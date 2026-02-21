@@ -9,8 +9,15 @@ TEST_TARGET := build/test_gitviz
 SRC := gitviz.c
 TEST_SRC := tests/test_gitviz.c
 REPO ?= $(CURDIR)
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+DATADIR ?= $(PREFIX)/share
+DESKTOPDIR ?= $(DATADIR)/applications
+ICONDIR ?= $(DATADIR)/pixmaps
+ICON_SRC ?= docs/res/gitviz-0.1.jpg
+APP_ID ?= gitviz
 
-.PHONY: all run test clean
+.PHONY: all run test install uninstall install-desktop uninstall-desktop clean
 
 all: $(TARGET)
 
@@ -25,6 +32,33 @@ test: $(TEST_TARGET)
 
 run: $(TARGET)
 	./$(TARGET) "$(REPO)"
+
+install: $(TARGET) install-desktop
+	install -d "$(DESTDIR)$(BINDIR)"
+	install -m 755 "$(TARGET)" "$(DESTDIR)$(BINDIR)/gitviz"
+
+uninstall: uninstall-desktop
+	rm -f "$(DESTDIR)$(BINDIR)/gitviz"
+
+install-desktop:
+	install -d "$(DESTDIR)$(ICONDIR)"
+	install -m 644 "$(ICON_SRC)" "$(DESTDIR)$(ICONDIR)/$(APP_ID).jpg"
+	install -d "$(DESTDIR)$(DESKTOPDIR)"
+	printf '%s\n' \
+		'[Desktop Entry]' \
+		'Type=Application' \
+		'Name=gitviz' \
+		'Comment=Local Git visualizer' \
+		'Exec=$(BINDIR)/gitviz --repo %F' \
+		'Icon=$(ICONDIR)/$(APP_ID).jpg' \
+		'Terminal=false' \
+		'Categories=Development;Utility;' \
+		'MimeType=inode/directory;' \
+	> "$(DESTDIR)$(DESKTOPDIR)/$(APP_ID).desktop"
+
+uninstall-desktop:
+	rm -f "$(DESTDIR)$(DESKTOPDIR)/$(APP_ID).desktop"
+	rm -f "$(DESTDIR)$(ICONDIR)/$(APP_ID).jpg"
 
 clean:
 	rm -f $(TARGET) $(TEST_TARGET)
