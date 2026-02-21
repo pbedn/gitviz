@@ -3,6 +3,19 @@
 ********************************************************************/
 
 #include "raylib.h"
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wunused-result"
+#endif
+#define RAYGUI_IMPLEMENTATION
+#include "raygui.h"
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +30,7 @@
 #define MAX_LINE       1024
 #define MAX_DIFF_LINES 20000
 #define MAX_HUNKS      2048
+#define MAX_DIR_ITEMS  256
 
 typedef struct {
     char type;
@@ -63,6 +77,13 @@ static char repoRoot[512];
 static bool repoInputActive = false;
 static char repoInputPath[512];
 static char repoInputHint[128];
+static bool repoInputEditMode = true;
+static char pickerItems[MAX_DIR_ITEMS][512];
+static const char *pickerItemPtrs[MAX_DIR_ITEMS];
+static int pickerItemCount = 0;
+static int pickerScrollIndex = 0;
+static int pickerActive = -1;
+static int pickerFocus = -1;
 
 static int selected = 0;
 static int hover    = -1;
@@ -118,6 +139,128 @@ static void ShellQuote(char *dst, size_t dstSize, const char *src)
     dst[d] = 0;
 }
 
+static bool IsDirectoryPath(const char *path)
+{
+    struct stat st;
+    return (stat(path, &st) == 0) && S_ISDIR(st.st_mode);
+}
+
+static void JoinPath(char *dst, size_t dstSize, const char *base, const char *name)
+{
+    if ((name[0] == '/') || (base[0] == 0))
+    {
+        CopyBounded(dst, dstSize, name);
+        return;
+    }
+    snprintf(dst, dstSize, "%s/%s", base, name);
+}
+
+static void TrimTrailingSlash(char *path)
+{
+    size_t n = strlen(path);
+    while ((n > 1) && (path[n - 1] == '/'))
+    {
+        path[n - 1] = 0;
+        n--;
+    }
+}
+
+static void GoParentPath(char *path, size_t pathSize)
+{
+    TrimTrailingSlash(path);
+    char *slash = strrchr(path, '/');
+    if (!slash)
+    {
+        CopyBounded(path, pathSize, ".");
+        return;
+    }
+    if (slash == path) slash[1] = 0;
+    else *slash = 0;
+}
+
+static int CompareStrings(const void *a, const void *b)
+{
+    const char *sa = (const char *)a;
+    const char *sb = (const char *)b;
+    return strcmp(sa, sb);
+}
+
+static void RefreshPickerItems(void)
+{
+    pickerItemCount = 0;
+    pickerActive = -1;
+    pickerFocus = -1;
+    pickerScrollIndex = 0;
+
+    if (repoInputPath[0] == 0) CopyBounded(repoInputPath, sizeof(repoInputPath), ".");
+
+    DIR *dir = opendir(repoInputPath);
+    if (!dir)
+    {
+        CopyBounded(repoInputHint, sizeof(repoInputHint), "Cannot open directory");
+        return;
+    }
+
+    if (strcmp(repoInputPath, "/") != 0)
+    {
+        CopyBounded(pickerItems[pickerItemCount++], sizeof(pickerItems[0]), "..");
+    }
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL && pickerItemCount < MAX_DIR_ITEMS)
+    {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+
+        char full[1024];
+        JoinPath(full, sizeof(full), repoInputPath, ent->d_name);
+        if (IsDirectoryPath(full))
+        {
+            CopyBounded(pickerItems[pickerItemCount], sizeof(pickerItems[0]), ent->d_name);
+            pickerItemCount++;
+        }
+    }
+    closedir(dir);
+
+    if (pickerItemCount > 1)
+    {
+        qsort(&pickerItems[1], (size_t)(pickerItemCount - 1), sizeof(pickerItems[0]), CompareStrings);
+    }
+
+    for (int i = 0; i < pickerItemCount; i++) pickerItemPtrs[i] = pickerItems[i];
+    repoInputHint[0] = 0;
+}
+
+static void PickerGoParent(void)
+{
+    GoParentPath(repoInputPath, sizeof(repoInputPath));
+    RefreshPickerItems();
+}
+
+static void PickerOpenSelected(void)
+{
+    if (pickerActive < 0 || pickerActive >= pickerItemCount)
+    {
+        CopyBounded(repoInputHint, sizeof(repoInputHint), "Select a directory first");
+        return;
+    }
+    if (strcmp(pickerItems[pickerActive], "..") == 0)
+    {
+        PickerGoParent();
+        return;
+    }
+
+    char next[1024];
+    JoinPath(next, sizeof(next), repoInputPath, pickerItems[pickerActive]);
+    if (!IsDirectoryPath(next))
+    {
+        CopyBounded(repoInputHint, sizeof(repoInputHint), "Selected item is not a directory");
+        return;
+    }
+
+    CopyBounded(repoInputPath, sizeof(repoInputPath), next);
+    RefreshPickerItems();
+}
+
 static bool ResolveRepoRoot(const char *startPath)
 {
     char qPath[1200];
@@ -130,15 +273,20 @@ static bool ResolveRepoRoot(const char *startPath)
     FILE *fp = popen(cmd, "r");
     if (!fp) return false;
 
-    repoRoot[0] = 0;
+    char found[512] = { 0 };
     if (fgets(line, sizeof(line), fp))
     {
         TrimTrailingNewline(line);
-        CopyBounded(repoRoot, sizeof(repoRoot), line);
+        CopyBounded(found, sizeof(found), line);
     }
 
     int rc = pclose(fp);
-    return rc == 0 && repoRoot[0] != 0;
+    if (rc == 0 && found[0] != 0)
+    {
+        CopyBounded(repoRoot, sizeof(repoRoot), found);
+        return true;
+    }
+    return false;
 }
 
 static void PrintUsage(const char *prog)
@@ -354,18 +502,12 @@ static void LoadDiffForFile(int index)
 
 /* ------------------------------------------------------------ */
 
-static void ReloadFromRepoPath(const char *path)
+static bool ReloadFromRepoPath(const char *path)
 {
     if (!ResolveRepoRoot(path))
     {
-        repoRoot[0] = 0;
-        repoStatus.fileCount = 0;
-        parsedDiff.lineCount = parsedDiff.hunkCount = 0;
-        selected = 0;
-        commitScroll = 0;
-        diffScroll = 0;
         CopyBounded(statusHint, sizeof(statusHint), "Invalid repo path. Press Ctrl+O to try again.");
-        return;
+        return false;
     }
 
     SetWindowTitle(TextFormat("gitviz - %s", repoRoot));
@@ -377,6 +519,7 @@ static void ReloadFromRepoPath(const char *path)
         LoadDiffForFile(0);
     else
         parsedDiff.lineCount = parsedDiff.hunkCount = 0;
+    return true;
 }
 
 /* ------------------------------------------------------------ */
@@ -407,7 +550,11 @@ int main(int argc, char **argv)
     }
     SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
 
-    ReloadFromRepoPath(startPath);
+    if (!ReloadFromRepoPath(startPath))
+    {
+        repoStatus.fileCount = 0;
+        parsedDiff.lineCount = parsedDiff.hunkCount = 0;
+    }
 
     SetTargetFPS(60);
 
@@ -429,47 +576,16 @@ int main(int argc, char **argv)
         {
             repoInputActive = true;
             repoInputHint[0] = 0;
+            repoInputEditMode = true;
             if (repoRoot[0] != 0)
                 CopyBounded(repoInputPath, sizeof(repoInputPath), repoRoot);
             else
                 CopyBounded(repoInputPath, sizeof(repoInputPath), ".");
+            RefreshPickerItems();
         }
 
         if (repoInputActive)
         {
-            int ch = GetCharPressed();
-            while (ch > 0)
-            {
-                if (ch >= 32 && ch <= 126)
-                {
-                    size_t len = strlen(repoInputPath);
-                    if (len + 1 < sizeof(repoInputPath))
-                    {
-                        repoInputPath[len] = (char)ch;
-                        repoInputPath[len + 1] = 0;
-                    }
-                }
-                ch = GetCharPressed();
-            }
-
-            if (IsKeyPressed(KEY_BACKSPACE))
-            {
-                size_t len = strlen(repoInputPath);
-                if (len > 0) repoInputPath[len - 1] = 0;
-            }
-            if ((IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && IsKeyPressed(KEY_V))
-            {
-                const char *clip = GetClipboardText();
-                if (clip && clip[0] != 0)
-                {
-                    size_t have = strlen(repoInputPath);
-                    size_t room = sizeof(repoInputPath) - 1 - have;
-                    if (room > 0)
-                    {
-                        strncat(repoInputPath, clip, room);
-                    }
-                }
-            }
             if (IsKeyPressed(KEY_ESCAPE))
             {
                 repoInputActive = false;
@@ -482,8 +598,8 @@ int main(int argc, char **argv)
                 }
                 else
                 {
-                    ReloadFromRepoPath(repoInputPath);
-                    repoInputActive = false;
+                    if (ReloadFromRepoPath(repoInputPath)) repoInputActive = false;
+                    else CopyBounded(repoInputHint, sizeof(repoInputHint), "Not a git repository");
                 }
             }
         }
@@ -636,28 +752,61 @@ int main(int argc, char **argv)
         if (repoInputActive)
         {
             DrawRectangle(0, 0, width, height, (Color){ 0, 0, 0, 160 });
-            int boxW = (int)(width * 0.75f);
-            if (boxW < 560) boxW = 560;
+            int boxW = (int)(width * 0.78f);
+            if (boxW < 640) boxW = 640;
             if (boxW > width - 40) boxW = width - 40;
-            int boxH = 150;
+            int boxH = 460;
             int boxX = (width - boxW) / 2;
             int boxY = (height - boxH) / 2;
 
-            DrawRectangleRounded((Rectangle){ (float)boxX, (float)boxY, (float)boxW, (float)boxH },
-                                 0.08f, 8, (Color){ 24, 33, 41, 245 });
-            DrawRectangleLinesEx((Rectangle){ (float)boxX, (float)boxY, (float)boxW, (float)boxH },
-                                 2.0f, (Color){ 92, 115, 132, 255 });
-            DrawTextEx(font, "Switch Repository (Enter to apply, Esc to cancel)",
-                       (Vector2){ (float)boxX + 14, (float)boxY + 12 }, fontSize, 1, textHash);
-            DrawRectangle((int)boxX + 12, (int)boxY + 50, boxW - 24, 44, (Color){ 15, 21, 26, 255 });
-            DrawRectangleLines((int)boxX + 12, (int)boxY + 50, boxW - 24, 44, divider);
-            DrawTextEx(font, repoInputPath, (Vector2){ (float)boxX + 20, (float)boxY + 61 }, fontSize, 1, textMain);
-            DrawTextEx(font, "Tip: Ctrl+V to paste path",
-                       (Vector2){ (float)boxX + 14, (float)boxY + 106 }, fontSize * 0.9f, 1, textMain);
+            Rectangle window = { (float)boxX, (float)boxY, (float)boxW, (float)boxH };
+            if (GuiWindowBox(window, "Repository Picker")) repoInputActive = false;
+            GuiLabel((Rectangle){ (float)boxX + 16, (float)boxY + 44, 72, 24 }, "Look in:");
+            if (GuiTextBox((Rectangle){ (float)boxX + 82, (float)boxY + 42, (float)boxW - 318, 28 },
+                           repoInputPath, (int)sizeof(repoInputPath), repoInputEditMode))
+            {
+                repoInputEditMode = !repoInputEditMode;
+                if (!repoInputEditMode) RefreshPickerItems();
+            }
+            if (GuiButton((Rectangle){ (float)boxX + boxW - 226, (float)boxY + 42, 64, 28 }, "Up"))
+            {
+                PickerGoParent();
+            }
+            if (GuiButton((Rectangle){ (float)boxX + boxW - 154, (float)boxY + 42, 64, 28 }, "Go"))
+            {
+                PickerOpenSelected();
+            }
+            if (GuiButton((Rectangle){ (float)boxX + boxW - 82, (float)boxY + 42, 64, 28 }, "R"))
+            {
+                RefreshPickerItems();
+            }
+            GuiListViewEx((Rectangle){ (float)boxX + 16, (float)boxY + 80, (float)boxW - 32, (float)boxH - 162 },
+                          pickerItemPtrs, pickerItemCount, &pickerScrollIndex, &pickerActive, &pickerFocus);
+            GuiLabel((Rectangle){ (float)boxX + 16, (float)boxY + boxH - 70, 80, 24 }, "Folder:");
+            GuiTextBox((Rectangle){ (float)boxX + 82, (float)boxY + boxH - 72, (float)boxW - 318, 28 },
+                       repoInputPath, (int)sizeof(repoInputPath), false);
+            if (GuiButton((Rectangle){ (float)boxX + boxW - 226, (float)boxY + boxH - 72, 96, 28 }, "Open"))
+            {
+                if (repoInputPath[0] == 0)
+                {
+                    CopyBounded(repoInputHint, sizeof(repoInputHint), "Path cannot be empty");
+                }
+                else if (ReloadFromRepoPath(repoInputPath))
+                {
+                    repoInputActive = false;
+                }
+                else
+                {
+                    CopyBounded(repoInputHint, sizeof(repoInputHint), "Not a git repository");
+                }
+            }
+            if (GuiButton((Rectangle){ (float)boxX + boxW - 122, (float)boxY + boxH - 72, 96, 28 }, "Cancel"))
+            {
+                repoInputActive = false;
+            }
             if (repoInputHint[0] != 0)
             {
-                DrawTextEx(font, repoInputHint,
-                           (Vector2){ (float)boxX + 240, (float)boxY + 106 }, fontSize * 0.9f, 1, minusColor);
+                GuiLabel((Rectangle){ (float)boxX + 16, (float)boxY + boxH - 42, (float)boxW - 32, 24 }, repoInputHint);
             }
         }
 
