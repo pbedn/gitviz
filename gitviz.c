@@ -100,6 +100,9 @@ static float dragRightGrabY = 0.0f;
 static float dragSplitterOffsetX = 0.0f;
 
 static Font font;
+static Font fontSmall;
+static bool fontOwned = false;
+static bool fontSmallOwned = false;
 
 /* ------------------------------------------------------------ */
 
@@ -591,10 +594,28 @@ int main(int argc, char **argv)
     font = LoadFontEx("assets/fonts/UbuntuMono-R.ttf", 32, 0, 0);
     if (font.texture.id == 0)
     {
-        TraceLog(LOG_WARNING, "Failed to load Ubuntu Mono, using default font");
+        TraceLog(LOG_WARNING, "Failed to load assets/fonts/UbuntuMono-R.ttf, using raylib default font");
         font = GetFontDefault();
+        fontOwned = false;
     }
-    SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
+    else
+    {
+        SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
+        fontOwned = true;
+    }
+
+    fontSmall = LoadFontEx("assets/fonts/Ubuntu-R.ttf", 24, 0, 0);
+    if (fontSmall.texture.id == 0)
+    {
+        TraceLog(LOG_WARNING, "Failed to load assets/fonts/Ubuntu-R.ttf, using raylib default font");
+        fontSmall = GetFontDefault();
+        fontSmallOwned = false;
+    }
+    else
+    {
+        SetTextureFilter(fontSmall.texture, TEXTURE_FILTER_BILINEAR);
+        fontSmallOwned = true;
+    }
 
     if (!ReloadFromRepoPath(startPath))
     {
@@ -617,7 +638,9 @@ int main(int argc, char **argv)
                 fontSize = Clamp(fontSize - 1, 10, 28);
         }
 
-        lineStep = fontSize * 1.35f;
+        float mainTextSize = fontSize;
+        float mainTextSpacing = 1.0f;
+        lineStep = mainTextSize * 1.35f;
 
         if ((IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && IsKeyPressed(KEY_O))
         {
@@ -879,7 +902,7 @@ int main(int argc, char **argv)
 
         DrawRectangle(0, 0, leftWidth, height, bgSidebar);
         DrawRectangle(0, 0, leftWidth, headerHeight, (Color){ 34, 45, 56, 255 });
-        DrawTextEx(font, "TIMELINE", (Vector2){ 12, 8 }, fontSize, 1, textHash);
+        DrawTextEx(font, "TIMELINE", (Vector2){ 12, 8 }, mainTextSize, mainTextSpacing, textHash);
         DrawLineEx((Vector2){ leftWidth, 0 },
                    (Vector2){ leftWidth, height }, 2.0f, divider);
         bool splitterHover = CheckCollisionPointRec(mouse, splitterRec);
@@ -893,13 +916,13 @@ int main(int argc, char **argv)
         {
             if (timeline[selected].type == TIMELINE_COMMIT)
                 DrawTextEx(font, TextFormat("DIFF %s  %s", timeline[selected].hash, timeline[selected].title),
-                           (Vector2){ leftWidth + 12, 8 }, fontSize, 1, textHash);
+                           (Vector2){ leftWidth + 12, 8 }, mainTextSize, mainTextSpacing, textHash);
             else
                 DrawTextEx(font, TextFormat("DIFF %s", timeline[selected].title),
-                           (Vector2){ leftWidth + 12, 8 }, fontSize, 1, textHash);
+                           (Vector2){ leftWidth + 12, 8 }, mainTextSize, mainTextSpacing, textHash);
         }
         else
-            DrawTextEx(font, "DIFF", (Vector2){ leftWidth + 12, 8 }, fontSize, 1, textHash);
+            DrawTextEx(font, "DIFF", (Vector2){ leftWidth + 12, 8 }, mainTextSize, mainTextSpacing, textHash);
 
         for (int i = 0; i < timelineCount; i++)
         {
@@ -915,19 +938,19 @@ int main(int argc, char **argv)
 
             if (timeline[i].type == TIMELINE_COMMIT)
             {
-                DrawTextEx(font, timeline[i].hash, (Vector2){ 20, y }, fontSize, 1, textHash);
-                DrawTextEx(font, timeline[i].title, (Vector2){ 96, y }, fontSize, 1, textMain);
+                DrawTextEx(font, timeline[i].hash, (Vector2){ 20, y }, mainTextSize, mainTextSpacing, textHash);
+                DrawTextEx(font, timeline[i].title, (Vector2){ 96, y }, mainTextSize, mainTextSpacing, textMain);
             }
             else
             {
-                DrawTextEx(font, timeline[i].title, (Vector2){ 20, y }, fontSize, 1, textMain);
+                DrawTextEx(font, timeline[i].title, (Vector2){ 20, y }, mainTextSize, mainTextSpacing, textMain);
             }
         }
         if (timelineCount == 0)
         {
             DrawTextEx(font, statusHint,
                        (Vector2){ 20, (float)listTop },
-                       fontSize, 1, textMain);
+                       mainTextSize, mainTextSpacing, textMain);
         }
 
         DrawRectangle(leftWidth, 0, width - leftWidth, height, bgDiff);
@@ -937,13 +960,13 @@ int main(int argc, char **argv)
         {
             DrawTextEx(font, "Select a timeline item to view its diff.",
                        (Vector2){ leftWidth + 12, (float)listTop },
-                       fontSize, 1, textMain);
+                       mainTextSize, mainTextSpacing, textMain);
         }
         for (int f = 0; f < parsedDiff.fileCount && dy < height - bottomBarHeight; f++)
         {
             DrawRectangle(leftWidth + 8, (int)dy, width - leftWidth - 16, (int)(lineStep + 8), (Color){ 26, 36, 44, 255 });
             DrawTextEx(font, parsedDiff.files[f].path,
-                       (Vector2){ (float)leftWidth + 14, dy + 4 }, fontSize, 1, textHash);
+                       (Vector2){ (float)leftWidth + 14, dy + 4 }, mainTextSize, mainTextSpacing, textHash);
             dy += lineStep + 10;
 
             int start = parsedDiff.files[f].lineStart;
@@ -956,7 +979,7 @@ int main(int argc, char **argv)
                 else if (dl->type == '-') c = minusColor;
                 else if (dl->type == '@') c = textHash;
 
-                DrawTextEx(font, dl->text, (Vector2){ (float)leftWidth + 12, dy }, fontSize, 1, c);
+                DrawTextEx(font, dl->text, (Vector2){ (float)leftWidth + 12, dy }, mainTextSize, mainTextSpacing, c);
                 dy += lineStep;
             }
             dy += 8;
@@ -972,16 +995,18 @@ int main(int argc, char **argv)
         DrawRectangle(0, height - bottomBarHeight, width, bottomBarHeight, (Color){ 17, 23, 29, 255 });
         DrawLine(0, height - bottomBarHeight, width, height - bottomBarHeight, divider);
         const char *rootText = (repoRoot[0] != 0) ? repoRoot : "(no repo)";
-        DrawTextEx(font,
+        float infoSize = 14.0f;
+        float infoSpacing = 1.0f;
+        DrawTextEx(fontSmall,
                    TextFormat("%s | branch: %s | unstaged: %d  staged: %d  untracked: %d",
                               rootText, branchName[0] ? branchName : "(unknown)",
                               unstagedFilesCount, stagedFilesCount, untrackedFilesCount),
-                   (Vector2){ 10, (float)height - bottomBarHeight + 5 }, fontSize * 0.85f, 1, textMain);
+                   (Vector2){ 10, (float)height - bottomBarHeight + 6 }, infoSize, infoSpacing, textMain);
         const char *help = "Ctrl+O: Open Repo  R: Refresh  Up/Down: Select  Ctrl+ +/-: Zoom";
-        int helpW = MeasureTextEx(font, help, fontSize * 0.85f, 1).x;
-        DrawTextEx(font, help,
-                   (Vector2){ (float)(width - helpW - 10), (float)height - bottomBarHeight + 5 },
-                   fontSize * 0.85f, 1, textHash);
+        int helpW = MeasureTextEx(fontSmall, help, infoSize, infoSpacing).x;
+        DrawTextEx(fontSmall, help,
+                   (Vector2){ (float)(width - helpW - 10), (float)height - bottomBarHeight + 6 },
+                   infoSize, infoSpacing, textHash);
 
         if (repoInputActive)
         {
@@ -1047,7 +1072,8 @@ int main(int argc, char **argv)
         EndDrawing();
     }
 
-    UnloadFont(font);
+    if (fontSmallOwned) UnloadFont(fontSmall);
+    if (fontOwned) UnloadFont(font);
     CloseWindow();
     return 0;
 }
