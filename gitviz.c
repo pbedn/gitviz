@@ -87,6 +87,10 @@ static float lineStep = 18.0f;
 
 static int commitScroll = 0;
 static int diffScroll   = 0;
+static bool dragLeftScrollbar = false;
+static bool dragRightScrollbar = false;
+static float dragLeftGrabY = 0.0f;
+static float dragRightGrabY = 0.0f;
 
 static Font font;
 
@@ -640,14 +644,142 @@ int main(int argc, char **argv)
         int leftWidth = 430;
         int headerHeight = 34;
         int listTop = headerHeight + 10;
+        int width = GetScreenWidth();
+        int height = GetScreenHeight();
+        int listViewHeight = height - listTop - 8;
+        int diffViewHeight = height - listTop - 8;
+        if (listViewHeight < 1) listViewHeight = 1;
+        if (diffViewHeight < 1) diffViewHeight = 1;
+
+        int timelineContentPx = (int)(timelineCount * lineStep);
+        int diffContentPx = 0;
+        for (int f = 0; f < parsedDiff.fileCount; f++)
+        {
+            diffContentPx += (int)(lineStep + 10);
+            diffContentPx += (int)(parsedDiff.files[f].lineCount * lineStep);
+            diffContentPx += 8;
+        }
+        if (diffContentPx == 0) diffContentPx = (int)lineStep;
+
+        int maxTimelineScrollPx = timelineContentPx - listViewHeight;
+        int maxDiffScrollPx = diffContentPx - diffViewHeight;
+        if (maxTimelineScrollPx < 0) maxTimelineScrollPx = 0;
+        if (maxDiffScrollPx < 0) maxDiffScrollPx = 0;
+        int linePx = (int)(lineStep + 0.5f);
+        if (linePx < 1) linePx = 1;
+        int maxCommitScroll = (maxTimelineScrollPx + linePx - 1) / linePx;
+        int maxDiffScroll = (maxDiffScrollPx + linePx - 1) / linePx;
+        const int scrollBarWidth = 8;
+        const int scrollBarInset = 2;
+        const int scrollHitPad = 6;
+
+        int leftTrackX = leftWidth - scrollBarWidth - scrollBarInset;
+        int leftTrackY = listTop;
+        int leftTrackH = listViewHeight;
+        int leftThumbH = leftTrackH;
+        int leftThumbY = leftTrackY;
+        if (timelineContentPx > listViewHeight)
+        {
+            leftThumbH = (int)((float)listViewHeight * ((float)listViewHeight / (float)timelineContentPx));
+            if (leftThumbH < 18) leftThumbH = 18;
+            leftThumbY = leftTrackY + (int)((float)(leftTrackH - leftThumbH) * ((float)(commitScroll * lineStep) / (float)maxTimelineScrollPx));
+            if (leftThumbY < leftTrackY) leftThumbY = leftTrackY;
+            if (leftThumbY > leftTrackY + leftTrackH - leftThumbH) leftThumbY = leftTrackY + leftTrackH - leftThumbH;
+        }
+        Rectangle leftTrackRec = { (float)leftTrackX, (float)leftTrackY, (float)scrollBarWidth, (float)leftTrackH };
+        Rectangle leftThumbRec = { (float)leftTrackX, (float)leftThumbY, (float)scrollBarWidth, (float)leftThumbH };
+        Rectangle leftTrackHitRec = { leftTrackRec.x - scrollHitPad, leftTrackRec.y, leftTrackRec.width + 2*scrollHitPad, leftTrackRec.height };
+        Rectangle leftThumbHitRec = { leftThumbRec.x - scrollHitPad, leftThumbRec.y - scrollHitPad, leftThumbRec.width + 2*scrollHitPad, leftThumbRec.height + 2*scrollHitPad };
+
+        int rightTrackX = width - scrollBarWidth - scrollBarInset;
+        int rightTrackY = listTop;
+        int rightTrackH = diffViewHeight;
+        int rightThumbH = rightTrackH;
+        int rightThumbY = rightTrackY;
+        if (diffContentPx > diffViewHeight)
+        {
+            rightThumbH = (int)((float)diffViewHeight * ((float)diffViewHeight / (float)diffContentPx));
+            if (rightThumbH < 18) rightThumbH = 18;
+            rightThumbY = rightTrackY + (int)((float)(rightTrackH - rightThumbH) * ((float)(diffScroll * lineStep) / (float)maxDiffScrollPx));
+            if (rightThumbY < rightTrackY) rightThumbY = rightTrackY;
+            if (rightThumbY > rightTrackY + rightTrackH - rightThumbH) rightThumbY = rightTrackY + rightTrackH - rightThumbH;
+        }
+        Rectangle rightTrackRec = { (float)rightTrackX, (float)rightTrackY, (float)scrollBarWidth, (float)rightTrackH };
+        Rectangle rightThumbRec = { (float)rightTrackX, (float)rightThumbY, (float)scrollBarWidth, (float)rightThumbH };
+        Rectangle rightTrackHitRec = { rightTrackRec.x - scrollHitPad, rightTrackRec.y, rightTrackRec.width + 2*scrollHitPad, rightTrackRec.height };
+        Rectangle rightThumbHitRec = { rightThumbRec.x - scrollHitPad, rightThumbRec.y - scrollHitPad, rightThumbRec.width + 2*scrollHitPad, rightThumbRec.height + 2*scrollHitPad };
 
         if (!repoInputActive && mouse.x < leftWidth)
             commitScroll -= (int)(wheel * 3);
         else if (!repoInputActive)
             diffScroll -= (int)(wheel * 3);
 
+        if (repoInputActive)
+        {
+            dragLeftScrollbar = false;
+            dragRightScrollbar = false;
+        }
+
+        if (!repoInputActive && IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+        {
+            if (maxTimelineScrollPx > 0 && CheckCollisionPointRec(mouse, leftThumbHitRec))
+            {
+                dragLeftScrollbar = true;
+                dragLeftGrabY = mouse.y - (float)leftThumbY;
+            }
+            else if (maxTimelineScrollPx > 0 && CheckCollisionPointRec(mouse, leftTrackHitRec))
+            {
+                float targetTop = mouse.y - (float)leftThumbH * 0.5f;
+                if (targetTop < leftTrackY) targetTop = (float)leftTrackY;
+                if (targetTop > leftTrackY + leftTrackH - leftThumbH) targetTop = (float)(leftTrackY + leftTrackH - leftThumbH);
+                float ratio = (leftTrackH - leftThumbH) > 0 ? (targetTop - (float)leftTrackY)/(float)(leftTrackH - leftThumbH) : 0.0f;
+                float scrollPx = ratio * (float)maxTimelineScrollPx;
+                commitScroll = (int)((scrollPx / lineStep) + 0.5f);
+            }
+            else if (maxDiffScrollPx > 0 && CheckCollisionPointRec(mouse, rightThumbHitRec))
+            {
+                dragRightScrollbar = true;
+                dragRightGrabY = mouse.y - (float)rightThumbY;
+            }
+            else if (maxDiffScrollPx > 0 && CheckCollisionPointRec(mouse, rightTrackHitRec))
+            {
+                float targetTop = mouse.y - (float)rightThumbH * 0.5f;
+                if (targetTop < rightTrackY) targetTop = (float)rightTrackY;
+                if (targetTop > rightTrackY + rightTrackH - rightThumbH) targetTop = (float)(rightTrackY + rightTrackH - rightThumbH);
+                float ratio = (rightTrackH - rightThumbH) > 0 ? (targetTop - (float)rightTrackY)/(float)(rightTrackH - rightThumbH) : 0.0f;
+                float scrollPx = ratio * (float)maxDiffScrollPx;
+                diffScroll = (int)((scrollPx / lineStep) + 0.5f);
+            }
+        }
+
+        if (!repoInputActive && dragLeftScrollbar && IsMouseButtonDown(MOUSE_LEFT_BUTTON))
+        {
+            float targetTop = mouse.y - dragLeftGrabY;
+            if (targetTop < leftTrackY) targetTop = (float)leftTrackY;
+            if (targetTop > leftTrackY + leftTrackH - leftThumbH) targetTop = (float)(leftTrackY + leftTrackH - leftThumbH);
+            float ratio = (leftTrackH - leftThumbH) > 0 ? (targetTop - (float)leftTrackY)/(float)(leftTrackH - leftThumbH) : 0.0f;
+            float scrollPx = ratio * (float)maxTimelineScrollPx;
+            commitScroll = (int)((scrollPx / lineStep) + 0.5f);
+        }
+        if (!repoInputActive && dragRightScrollbar && IsMouseButtonDown(MOUSE_LEFT_BUTTON))
+        {
+            float targetTop = mouse.y - dragRightGrabY;
+            if (targetTop < rightTrackY) targetTop = (float)rightTrackY;
+            if (targetTop > rightTrackY + rightTrackH - rightThumbH) targetTop = (float)(rightTrackY + rightTrackH - rightThumbH);
+            float ratio = (rightTrackH - rightThumbH) > 0 ? (targetTop - (float)rightTrackY)/(float)(rightTrackH - rightThumbH) : 0.0f;
+            float scrollPx = ratio * (float)maxDiffScrollPx;
+            diffScroll = (int)((scrollPx / lineStep) + 0.5f);
+        }
+        if (IsMouseButtonReleased(MOUSE_LEFT_BUTTON))
+        {
+            dragLeftScrollbar = false;
+            dragRightScrollbar = false;
+        }
+
         if (commitScroll < 0) commitScroll = 0;
         if (diffScroll < 0) diffScroll = 0;
+        if (commitScroll > maxCommitScroll) commitScroll = maxCommitScroll;
+        if (diffScroll > maxDiffScroll) diffScroll = maxDiffScroll;
 
         hover = -1;
 
@@ -659,7 +791,7 @@ int main(int argc, char **argv)
                 leftWidth - 20, lineStep
             };
 
-            if (!repoInputActive && CheckCollisionPointRec(mouse, r))
+            if (!repoInputActive && !CheckCollisionPointRec(mouse, leftTrackRec) && CheckCollisionPointRec(mouse, r))
             {
                 hover = i;
                 if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
@@ -686,9 +818,6 @@ int main(int argc, char **argv)
         Color minusColor  = (Color){ 232, 128, 128, 255 };
 
         ClearBackground(bgMain);
-
-        int width  = GetScreenWidth();
-        int height = GetScreenHeight();
 
         DrawRectangle(0, 0, leftWidth, height, bgSidebar);
         DrawRectangle(0, 0, leftWidth, headerHeight, (Color){ 34, 45, 56, 255 });
@@ -768,6 +897,13 @@ int main(int argc, char **argv)
             }
             dy += 8;
         }
+
+        DrawRectangle(leftTrackX, leftTrackY, 6, leftTrackH, (Color){ 24, 30, 38, 255 });
+        DrawRectangle((int)leftThumbRec.x, (int)leftThumbRec.y, (int)leftThumbRec.width, (int)leftThumbRec.height,
+                      dragLeftScrollbar ? (Color){ 120, 144, 162, 255 } : (Color){ 85, 104, 118, 255 });
+        DrawRectangle(rightTrackX, rightTrackY, 6, rightTrackH, (Color){ 24, 30, 38, 255 });
+        DrawRectangle((int)rightThumbRec.x, (int)rightThumbRec.y, (int)rightThumbRec.width, (int)rightThumbRec.height,
+                      dragRightScrollbar ? (Color){ 120, 144, 162, 255 } : (Color){ 85, 104, 118, 255 });
 
         if (repoInputActive)
         {
