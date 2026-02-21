@@ -68,6 +68,10 @@ static int timelineCount = 0;
 static ParsedDiff parsedDiff;
 static char statusHint[128];
 static char repoRoot[512];
+static char branchName[128];
+static int unstagedFilesCount = 0;
+static int stagedFilesCount = 0;
+static int untrackedFilesCount = 0;
 static bool repoInputActive = false;
 static char repoInputPath[512];
 static char repoInputHint[128];
@@ -343,6 +347,22 @@ static int CountLinesInCommand(const char *cmd)
     return count;
 }
 
+static bool ReadFirstLineFromCommand(const char *cmd, char *out, size_t outSize)
+{
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return false;
+    char line[MAX_LINE];
+    bool ok = false;
+    if (fgets(line, sizeof(line), fp))
+    {
+        TrimTrailingNewline(line);
+        CopyBounded(out, outSize, line);
+        ok = true;
+    }
+    pclose(fp);
+    return ok;
+}
+
 static int AddDiffPanel(const char *path)
 {
     if (parsedDiff.fileCount >= MAX_DIFF_FILES) return -1;
@@ -414,23 +434,32 @@ static void LoadTimeline(void)
     char cmd[1600];
     ShellQuote(qRepo, sizeof(qRepo), repoRoot);
 
-    int unstagedCount = 0;
-    int stagedCount = 0;
+    unstagedFilesCount = 0;
+    stagedFilesCount = 0;
+    untrackedFilesCount = 0;
+    branchName[0] = 0;
+
+    snprintf(cmd, sizeof(cmd), "git -C %s rev-parse --abbrev-ref HEAD", qRepo);
+    if (!ReadFirstLineFromCommand(cmd, branchName, sizeof(branchName)))
+        CopyBounded(branchName, sizeof(branchName), "(unknown)");
+
     snprintf(cmd, sizeof(cmd), "git -C %s diff --name-only", qRepo);
-    unstagedCount = CountLinesInCommand(cmd);
+    unstagedFilesCount = CountLinesInCommand(cmd);
     snprintf(cmd, sizeof(cmd), "git -C %s diff --cached --name-only", qRepo);
-    stagedCount = CountLinesInCommand(cmd);
+    stagedFilesCount = CountLinesInCommand(cmd);
+    snprintf(cmd, sizeof(cmd), "git -C %s ls-files --others --exclude-standard", qRepo);
+    untrackedFilesCount = CountLinesInCommand(cmd);
 
     timeline[timelineCount].type = TIMELINE_UNSTAGED;
     timeline[timelineCount].hash[0] = 0;
     snprintf(timeline[timelineCount].title, sizeof(timeline[timelineCount].title),
-             "Unstaged Files (%d)", unstagedCount);
+             "Unstaged Files (%d)", unstagedFilesCount);
     timelineCount++;
 
     timeline[timelineCount].type = TIMELINE_STAGED;
     timeline[timelineCount].hash[0] = 0;
     snprintf(timeline[timelineCount].title, sizeof(timeline[timelineCount].title),
-             "Staged Files (%d)", stagedCount);
+             "Staged Files (%d)", stagedFilesCount);
     timelineCount++;
 
     snprintf(cmd, sizeof(cmd), "git -C %s log --oneline --max-count=%d", qRepo, MAX_TIMELINE - 2);
@@ -646,6 +675,7 @@ int main(int argc, char **argv)
 
         int headerHeight = 34;
         int listTop = headerHeight + 10;
+        int bottomBarHeight = 28;
         int width = GetScreenWidth();
         int height = GetScreenHeight();
         int minLeftWidth = 260;
@@ -656,8 +686,8 @@ int main(int argc, char **argv)
         if (leftWidth < minLeftWidth) leftWidth = minLeftWidth;
         if (leftWidth > maxLeftWidth) leftWidth = maxLeftWidth;
         leftPaneWidth = leftWidth;
-        int listViewHeight = height - listTop - 8;
-        int diffViewHeight = height - listTop - 8;
+        int listViewHeight = height - listTop - bottomBarHeight - 8;
+        int diffViewHeight = height - listTop - bottomBarHeight - 8;
         if (listViewHeight < 1) listViewHeight = 1;
         if (diffViewHeight < 1) diffViewHeight = 1;
 
@@ -874,7 +904,7 @@ int main(int argc, char **argv)
         for (int i = 0; i < timelineCount; i++)
         {
             float y = listTop + i * lineStep - commitScroll * lineStep;
-            if (y < -lineStep || y > height) continue;
+            if (y < -lineStep || y > height - bottomBarHeight) continue;
 
             if (i == selected)
                 DrawRectangle(10, y, leftWidth - 20, lineStep,
@@ -909,7 +939,7 @@ int main(int argc, char **argv)
                        (Vector2){ leftWidth + 12, (float)listTop },
                        fontSize, 1, textMain);
         }
-        for (int f = 0; f < parsedDiff.fileCount && dy < height; f++)
+        for (int f = 0; f < parsedDiff.fileCount && dy < height - bottomBarHeight; f++)
         {
             DrawRectangle(leftWidth + 8, (int)dy, width - leftWidth - 16, (int)(lineStep + 8), (Color){ 26, 36, 44, 255 });
             DrawTextEx(font, parsedDiff.files[f].path,
@@ -918,7 +948,7 @@ int main(int argc, char **argv)
 
             int start = parsedDiff.files[f].lineStart;
             int count = parsedDiff.files[f].lineCount;
-            for (int i = 0; i < count && dy < height; i++)
+            for (int i = 0; i < count && dy < height - bottomBarHeight; i++)
             {
                 DiffLine *dl = &parsedDiff.lines[start + i];
                 Color c = textMain;
@@ -938,6 +968,20 @@ int main(int argc, char **argv)
         DrawRectangle(rightTrackX, rightTrackY, 6, rightTrackH, (Color){ 24, 30, 38, 255 });
         DrawRectangle((int)rightThumbRec.x, (int)rightThumbRec.y, (int)rightThumbRec.width, (int)rightThumbRec.height,
                       dragRightScrollbar ? (Color){ 120, 144, 162, 255 } : (Color){ 85, 104, 118, 255 });
+
+        DrawRectangle(0, height - bottomBarHeight, width, bottomBarHeight, (Color){ 17, 23, 29, 255 });
+        DrawLine(0, height - bottomBarHeight, width, height - bottomBarHeight, divider);
+        const char *rootText = (repoRoot[0] != 0) ? repoRoot : "(no repo)";
+        DrawTextEx(font,
+                   TextFormat("%s | branch: %s | unstaged: %d  staged: %d  untracked: %d",
+                              rootText, branchName[0] ? branchName : "(unknown)",
+                              unstagedFilesCount, stagedFilesCount, untrackedFilesCount),
+                   (Vector2){ 10, (float)height - bottomBarHeight + 5 }, fontSize * 0.85f, 1, textMain);
+        const char *help = "Ctrl+O: Open Repo  R: Refresh  Up/Down: Select  Ctrl+ +/-: Zoom";
+        int helpW = MeasureTextEx(font, help, fontSize * 0.85f, 1).x;
+        DrawTextEx(font, help,
+                   (Vector2){ (float)(width - helpW - 10), (float)height - bottomBarHeight + 5 },
+                   fontSize * 0.85f, 1, textHash);
 
         if (repoInputActive)
         {
