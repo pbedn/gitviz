@@ -26,51 +26,45 @@
     ((value) < (min) ? (min) : ((value) > (max) ? (max) : (value)))
 #endif
 
-#define MAX_FILES      512
-#define MAX_LINE       1024
-#define MAX_DIFF_LINES 20000
-#define MAX_HUNKS      2048
-#define MAX_DIR_ITEMS  256
+#define MAX_LINE          1024
+#define MAX_DIFF_LINES    40000
+#define MAX_DIFF_FILES    1024
+#define MAX_TIMELINE      512
+#define MAX_DIR_ITEMS     256
+#define MAX_COMMIT_TITLE  256
+
+typedef enum {
+    TIMELINE_UNSTAGED = 0,
+    TIMELINE_STAGED   = 1,
+    TIMELINE_COMMIT   = 2
+} TimelineType;
+
+typedef struct {
+    TimelineType type;
+    char hash[16];
+    char title[MAX_COMMIT_TITLE];
+} TimelineItem;
 
 typedef struct {
     char type;
-    int oldLine;
-    int newLine;
     char text[MAX_LINE];
 } DiffLine;
 
 typedef struct {
-    int oldStart;
-    int oldCount;
-    int newStart;
-    int newCount;
+    char path[512];
     int lineStart;
     int lineCount;
-    char header[128];
-} DiffHunk;
+} DiffFilePanel;
 
 typedef struct {
-    char indexStatus;
-    char worktreeStatus;
-    char path[512];
-    char oldPath[512];
-    bool isRenamed;
-    bool isUntracked;
-} ChangedFile;
-
-typedef struct {
-    ChangedFile files[MAX_FILES];
-    int fileCount;
-} RepoStatus;
-
-typedef struct {
-    DiffHunk hunks[MAX_HUNKS];
-    int hunkCount;
     DiffLine lines[MAX_DIFF_LINES];
     int lineCount;
+    DiffFilePanel files[MAX_DIFF_FILES];
+    int fileCount;
 } ParsedDiff;
 
-static RepoStatus repoStatus;
+static TimelineItem timeline[MAX_TIMELINE];
+static int timelineCount = 0;
 static ParsedDiff parsedDiff;
 static char statusHint[128];
 static char repoRoot[512];
@@ -298,7 +292,7 @@ static void PrintUsage(const char *prog)
     printf("  -h, --help          Show this help and exit\n");
     printf("  -r, --repo <path>   Observe the git repository at <path>\n\n");
     printf("Runtime keys:\n");
-    printf("  Up/Down             Select changed file\n");
+    printf("  Up/Down             Select timeline item\n");
     printf("  Mouse wheel         Scroll panel under cursor\n");
     printf("  R                   Refresh git status/diff\n");
     printf("  Ctrl + O            Open repository switcher\n");
@@ -331,70 +325,78 @@ static bool ParseArgs(int argc, char **argv, const char **repoArg, bool *showHel
     return true;
 }
 
-static void ParseHunkHeader(const char *line, DiffHunk *hunk)
+static int CountLinesInCommand(const char *cmd)
 {
-    int oldStart = 0, oldCount = 1, newStart = 0, newCount = 1;
-    if (sscanf(line, "@@ -%d,%d +%d,%d @@", &oldStart, &oldCount, &newStart, &newCount) == 4)
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return 0;
+    int count = 0;
+    char line[MAX_LINE];
+    while (fgets(line, sizeof(line), fp)) count++;
+    pclose(fp);
+    return count;
+}
+
+static int AddDiffPanel(const char *path)
+{
+    if (parsedDiff.fileCount >= MAX_DIFF_FILES) return -1;
+    DiffFilePanel *p = &parsedDiff.files[parsedDiff.fileCount++];
+    memset(p, 0, sizeof(*p));
+    CopyBounded(p->path, sizeof(p->path), path);
+    p->lineStart = parsedDiff.lineCount;
+    return parsedDiff.fileCount - 1;
+}
+
+static void ParsePathFromDiffHeader(const char *line, char *out, size_t outSize)
+{
+    const char *b = strstr(line, " b/");
+    if (b)
     {
-        hunk->oldStart = oldStart;
-        hunk->oldCount = oldCount;
-        hunk->newStart = newStart;
-        hunk->newCount = newCount;
+        b += 3;
+        size_t i = 0;
+        while (b[i] && !isspace((unsigned char)b[i]) && i + 1 < outSize)
+        {
+            out[i] = b[i];
+            i++;
+        }
+        out[i] = 0;
         return;
     }
-    if (sscanf(line, "@@ -%d +%d,%d @@", &oldStart, &newStart, &newCount) == 3)
+    CopyBounded(out, outSize, "(file)");
+}
+
+static void ParseDiffStream(FILE *fp)
+{
+    parsedDiff.lineCount = 0;
+    parsedDiff.fileCount = 0;
+
+    char line[MAX_LINE];
+    int currentPanel = -1;
+
+    while (fgets(line, sizeof(line), fp) && parsedDiff.lineCount < MAX_DIFF_LINES)
     {
-        hunk->oldStart = oldStart;
-        hunk->oldCount = 1;
-        hunk->newStart = newStart;
-        hunk->newCount = newCount;
-        return;
-    }
-    if (sscanf(line, "@@ -%d,%d +%d @@", &oldStart, &oldCount, &newStart) == 3)
-    {
-        hunk->oldStart = oldStart;
-        hunk->oldCount = oldCount;
-        hunk->newStart = newStart;
-        hunk->newCount = 1;
-        return;
-    }
-    if (sscanf(line, "@@ -%d +%d @@", &oldStart, &newStart) == 2)
-    {
-        hunk->oldStart = oldStart;
-        hunk->oldCount = 1;
-        hunk->newStart = newStart;
-        hunk->newCount = 1;
-        return;
+        TrimTrailingNewline(line);
+
+        if (strncmp(line, "diff --git ", 11) == 0)
+        {
+            char path[512];
+            ParsePathFromDiffHeader(line, path, sizeof(path));
+            currentPanel = AddDiffPanel(path);
+            continue;
+        }
+
+        if (currentPanel < 0) currentPanel = AddDiffPanel("(summary)");
+        if (currentPanel < 0) break;
+
+        DiffLine *dl = &parsedDiff.lines[parsedDiff.lineCount++];
+        dl->type = line[0] ? line[0] : ' ';
+        CopyBounded(dl->text, sizeof(dl->text), line);
+        parsedDiff.files[currentPanel].lineCount++;
     }
 }
 
-static void ParseStatusLine(const char *line, ChangedFile *out)
+static void LoadTimeline(void)
 {
-    memset(out, 0, sizeof(*out));
-
-    if (strlen(line) < 4) return;
-
-    out->indexStatus = line[0];
-    out->worktreeStatus = line[1];
-    out->isUntracked = (line[0] == '?' && line[1] == '?');
-
-    const char *pathStart = line + 3;
-    CopyBounded(out->path, sizeof(out->path), pathStart);
-    TrimTrailingNewline(out->path);
-
-    char *arrow = strstr(out->path, " -> ");
-    if (arrow)
-    {
-        out->isRenamed = true;
-        *arrow = 0;
-        CopyBounded(out->oldPath, sizeof(out->oldPath), out->path);
-        CopyBounded(out->path, sizeof(out->path), arrow + 4);
-    }
-}
-
-static void LoadRepoStatus(void)
-{
-    statusHint[0] = 0;
+    timelineCount = 0;
     if (repoRoot[0] == 0)
     {
         CopyBounded(statusHint, sizeof(statusHint), "No repository selected");
@@ -402,101 +404,77 @@ static void LoadRepoStatus(void)
     }
 
     char qRepo[1200];
-    char cmd[1400];
+    char cmd[1600];
     ShellQuote(qRepo, sizeof(qRepo), repoRoot);
-    snprintf(cmd, sizeof(cmd), "git -C %s status --porcelain=v1", qRepo);
+
+    int unstagedCount = 0;
+    int stagedCount = 0;
+    snprintf(cmd, sizeof(cmd), "git -C %s diff --name-only", qRepo);
+    unstagedCount = CountLinesInCommand(cmd);
+    snprintf(cmd, sizeof(cmd), "git -C %s diff --cached --name-only", qRepo);
+    stagedCount = CountLinesInCommand(cmd);
+
+    timeline[timelineCount].type = TIMELINE_UNSTAGED;
+    timeline[timelineCount].hash[0] = 0;
+    snprintf(timeline[timelineCount].title, sizeof(timeline[timelineCount].title),
+             "Unstaged Files (%d)", unstagedCount);
+    timelineCount++;
+
+    timeline[timelineCount].type = TIMELINE_STAGED;
+    timeline[timelineCount].hash[0] = 0;
+    snprintf(timeline[timelineCount].title, sizeof(timeline[timelineCount].title),
+             "Staged Files (%d)", stagedCount);
+    timelineCount++;
+
+    snprintf(cmd, sizeof(cmd), "git -C %s log --oneline --max-count=%d", qRepo, MAX_TIMELINE - 2);
+    FILE *fp = popen(cmd, "r");
+    if (!fp)
+    {
+        CopyBounded(statusHint, sizeof(statusHint), "Failed to load commit history");
+        return;
+    }
+
+    char line[MAX_LINE];
+    while (fgets(line, sizeof(line), fp) && timelineCount < MAX_TIMELINE)
+    {
+        TrimTrailingNewline(line);
+        char *space = strchr(line, ' ');
+        if (!space) continue;
+        *space = 0;
+        TimelineItem *it = &timeline[timelineCount++];
+        it->type = TIMELINE_COMMIT;
+        CopyBounded(it->hash, sizeof(it->hash), line);
+        CopyBounded(it->title, sizeof(it->title), space + 1);
+    }
+    pclose(fp);
+}
+
+static void LoadDiffForSelection(int index)
+{
+    parsedDiff.lineCount = 0;
+    parsedDiff.fileCount = 0;
+
+    if (index < 0 || index >= timelineCount || repoRoot[0] == 0) return;
+
+    char qRepo[1200];
+    char cmd[2200];
+    ShellQuote(qRepo, sizeof(qRepo), repoRoot);
+    const TimelineItem *it = &timeline[index];
+
+    if (it->type == TIMELINE_UNSTAGED)
+        snprintf(cmd, sizeof(cmd), "git -C %s diff --no-color", qRepo);
+    else if (it->type == TIMELINE_STAGED)
+        snprintf(cmd, sizeof(cmd), "git -C %s diff --cached --no-color", qRepo);
+    else
+        snprintf(cmd, sizeof(cmd), "git -C %s show --no-color --pretty=format: %s", qRepo, it->hash);
 
     FILE *fp = popen(cmd, "r");
     if (!fp)
     {
-        CopyBounded(statusHint, sizeof(statusHint), "Failed to run git status");
+        CopyBounded(statusHint, sizeof(statusHint), "Failed to load diff");
         return;
     }
-
-    repoStatus.fileCount = 0;
-    char line[MAX_LINE];
-
-    while (fgets(line, sizeof(line), fp) && repoStatus.fileCount < MAX_FILES)
-    {
-        ParseStatusLine(line, &repoStatus.files[repoStatus.fileCount]);
-        if (repoStatus.files[repoStatus.fileCount].path[0] != 0)
-            repoStatus.fileCount++;
-    }
-    int rc = pclose(fp);
-    if (rc != 0)
-    {
-        CopyBounded(statusHint, sizeof(statusHint), "Not inside a git repository");
-        return;
-    }
-    if (repoStatus.fileCount == 0)
-        CopyBounded(statusHint, sizeof(statusHint), "No local changes. Edit files, then press R to refresh.");
-}
-
-/* ------------------------------------------------------------ */
-
-static void LoadDiffForFile(int index)
-{
-    if (index < 0 || index >= repoStatus.fileCount) return;
-    if (repoRoot[0] == 0) return;
-
-    char qRepo[1200];
-    char qPath[1200];
-    char cmd[2800];
-    ShellQuote(qRepo, sizeof(qRepo), repoRoot);
-    ShellQuote(qPath, sizeof(qPath), repoStatus.files[index].path);
-    snprintf(cmd, sizeof(cmd),
-             "git -C %s diff --no-color -- %s",
-             qRepo, qPath);
-
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return;
-
-    parsedDiff.hunkCount = 0;
-    parsedDiff.lineCount = 0;
-    int currentHunk = -1;
-    int oldLine = 0;
-    int newLine = 0;
-    char line[MAX_LINE];
-
-    while (fgets(line, sizeof(line), fp) && parsedDiff.lineCount < MAX_DIFF_LINES)
-    {
-        TrimTrailingNewline(line);
-
-        if (strncmp(line, "@@ ", 3) == 0 && parsedDiff.hunkCount < MAX_HUNKS)
-        {
-            DiffHunk *h = &parsedDiff.hunks[parsedDiff.hunkCount++];
-            memset(h, 0, sizeof(*h));
-            CopyBounded(h->header, sizeof(h->header), line);
-            ParseHunkHeader(line, h);
-            h->lineStart = parsedDiff.lineCount;
-            currentHunk = parsedDiff.hunkCount - 1;
-            oldLine = h->oldStart;
-            newLine = h->newStart;
-        }
-
-        DiffLine *dl = &parsedDiff.lines[parsedDiff.lineCount++];
-        memset(dl, 0, sizeof(*dl));
-        dl->type = line[0] ? line[0] : ' ';
-        CopyBounded(dl->text, sizeof(dl->text), line);
-
-        if (currentHunk >= 0)
-        {
-            if (dl->type == ' ')
-            {
-                dl->oldLine = oldLine++;
-                dl->newLine = newLine++;
-            }
-            else if (dl->type == '-')
-            {
-                dl->oldLine = oldLine++;
-            }
-            else if (dl->type == '+')
-            {
-                dl->newLine = newLine++;
-            }
-            parsedDiff.hunks[currentHunk].lineCount++;
-        }
-    }
+    ParseDiffStream(fp);
     pclose(fp);
 }
 
@@ -514,12 +492,44 @@ static bool ReloadFromRepoPath(const char *path)
     selected = 0;
     commitScroll = 0;
     diffScroll = 0;
-    LoadRepoStatus();
-    if (repoStatus.fileCount > 0)
-        LoadDiffForFile(0);
-    else
-        parsedDiff.lineCount = parsedDiff.hunkCount = 0;
+    LoadTimeline();
+    if (timelineCount > 0) LoadDiffForSelection(0);
+    else parsedDiff.lineCount = 0;
     return true;
+}
+
+static void RefreshTimelineAndSelection(void)
+{
+    TimelineType prevType = TIMELINE_UNSTAGED;
+    char prevHash[16] = { 0 };
+    if (selected >= 0 && selected < timelineCount)
+    {
+        prevType = timeline[selected].type;
+        CopyBounded(prevHash, sizeof(prevHash), timeline[selected].hash);
+    }
+
+    LoadTimeline();
+    selected = 0;
+    for (int i = 0; i < timelineCount; i++)
+    {
+        if (timeline[i].type != prevType) continue;
+        if (prevType == TIMELINE_COMMIT)
+        {
+            if (strcmp(timeline[i].hash, prevHash) == 0)
+            {
+                selected = i;
+                break;
+            }
+        }
+        else
+        {
+            selected = i;
+            break;
+        }
+    }
+    if (timelineCount > 0) LoadDiffForSelection(selected);
+    else parsedDiff.lineCount = 0;
+    diffScroll = 0;
 }
 
 /* ------------------------------------------------------------ */
@@ -552,8 +562,9 @@ int main(int argc, char **argv)
 
     if (!ReloadFromRepoPath(startPath))
     {
-        repoStatus.fileCount = 0;
-        parsedDiff.lineCount = parsedDiff.hunkCount = 0;
+        timelineCount = 0;
+        parsedDiff.lineCount = 0;
+        parsedDiff.fileCount = 0;
     }
 
     SetTargetFPS(60);
@@ -604,25 +615,21 @@ int main(int argc, char **argv)
             }
         }
 
-        if (!repoInputActive && IsKeyPressed(KEY_DOWN) && selected < repoStatus.fileCount - 1)
+        if (!repoInputActive && IsKeyPressed(KEY_DOWN) && selected < timelineCount - 1)
         {
             selected++;
-            LoadDiffForFile(selected);
+            diffScroll = 0;
+            LoadDiffForSelection(selected);
         }
         if (!repoInputActive && IsKeyPressed(KEY_UP) && selected > 0)
         {
             selected--;
-            LoadDiffForFile(selected);
+            diffScroll = 0;
+            LoadDiffForSelection(selected);
         }
         if (!repoInputActive && IsKeyPressed(KEY_R))
         {
-            LoadRepoStatus();
-            if (selected >= repoStatus.fileCount)
-                selected = repoStatus.fileCount > 0 ? repoStatus.fileCount - 1 : 0;
-            if (repoStatus.fileCount > 0)
-                LoadDiffForFile(selected);
-            else
-                parsedDiff.lineCount = parsedDiff.hunkCount = 0;
+            RefreshTimelineAndSelection();
         }
 
         /* ---------- Mouse ---------- */
@@ -645,7 +652,7 @@ int main(int argc, char **argv)
         hover = -1;
 
         int y0 = listTop - commitScroll * lineStep;
-        for (int i = 0; i < repoStatus.fileCount; i++)
+        for (int i = 0; i < timelineCount; i++)
         {
             Rectangle r = {
                 10, y0 + i * lineStep,
@@ -659,7 +666,7 @@ int main(int argc, char **argv)
                 {
                     selected = i;
                     diffScroll = 0;
-                    LoadDiffForFile(i);
+                    LoadDiffForSelection(i);
                 }
             }
         }
@@ -685,17 +692,23 @@ int main(int argc, char **argv)
 
         DrawRectangle(0, 0, leftWidth, height, bgSidebar);
         DrawRectangle(0, 0, leftWidth, headerHeight, (Color){ 34, 45, 56, 255 });
-        DrawTextEx(font, "CHANGED FILES", (Vector2){ 12, 8 }, fontSize, 1, textHash);
+        DrawTextEx(font, "TIMELINE", (Vector2){ 12, 8 }, fontSize, 1, textHash);
         DrawLineEx((Vector2){ leftWidth, 0 },
                    (Vector2){ leftWidth, height }, 2.0f, divider);
         DrawRectangle(leftWidth, 0, width - leftWidth, headerHeight, (Color){ 20, 28, 34, 255 });
-        if (repoStatus.fileCount > 0)
-            DrawTextEx(font, TextFormat("DIFF %s", repoStatus.files[selected].path),
-                       (Vector2){ leftWidth + 12, 8 }, fontSize, 1, textHash);
+        if (timelineCount > 0)
+        {
+            if (timeline[selected].type == TIMELINE_COMMIT)
+                DrawTextEx(font, TextFormat("DIFF %s  %s", timeline[selected].hash, timeline[selected].title),
+                           (Vector2){ leftWidth + 12, 8 }, fontSize, 1, textHash);
+            else
+                DrawTextEx(font, TextFormat("DIFF %s", timeline[selected].title),
+                           (Vector2){ leftWidth + 12, 8 }, fontSize, 1, textHash);
+        }
         else
             DrawTextEx(font, "DIFF", (Vector2){ leftWidth + 12, 8 }, fontSize, 1, textHash);
 
-        for (int i = 0; i < repoStatus.fileCount; i++)
+        for (int i = 0; i < timelineCount; i++)
         {
             float y = listTop + i * lineStep - commitScroll * lineStep;
             if (y < -lineStep || y > height) continue;
@@ -707,19 +720,17 @@ int main(int argc, char **argv)
                 DrawRectangle(10, y, leftWidth - 20, lineStep,
                               rowHover);
 
-            char statusText[4];
-            snprintf(statusText, sizeof(statusText), "%c%c",
-                     repoStatus.files[i].indexStatus,
-                     repoStatus.files[i].worktreeStatus);
-            DrawTextEx(font, statusText,
-                       (Vector2){ 20, y },
-                       fontSize, 1, textHash);
-
-            DrawTextEx(font, repoStatus.files[i].path,
-                       (Vector2){ 74, y },
-                       fontSize, 1, textMain);
+            if (timeline[i].type == TIMELINE_COMMIT)
+            {
+                DrawTextEx(font, timeline[i].hash, (Vector2){ 20, y }, fontSize, 1, textHash);
+                DrawTextEx(font, timeline[i].title, (Vector2){ 96, y }, fontSize, 1, textMain);
+            }
+            else
+            {
+                DrawTextEx(font, timeline[i].title, (Vector2){ 20, y }, fontSize, 1, textMain);
+            }
         }
-        if (repoStatus.fileCount == 0)
+        if (timelineCount == 0)
         {
             DrawTextEx(font, statusHint,
                        (Vector2){ 20, (float)listTop },
@@ -731,22 +742,31 @@ int main(int argc, char **argv)
         float dy = listTop - diffScroll * lineStep;
         if (parsedDiff.lineCount == 0)
         {
-            DrawTextEx(font, "Select a changed file to view its diff.",
+            DrawTextEx(font, "Select a timeline item to view its diff.",
                        (Vector2){ leftWidth + 12, (float)listTop },
                        fontSize, 1, textMain);
         }
-        for (int i = 0; i < parsedDiff.lineCount && dy < height; i++)
+        for (int f = 0; f < parsedDiff.fileCount && dy < height; f++)
         {
-            Color c = textMain;
-            if (parsedDiff.lines[i].type == '+') c = plusColor;
-            else if (parsedDiff.lines[i].type == '-') c = minusColor;
-            else if (parsedDiff.lines[i].type == '@') c = textHash;
+            DrawRectangle(leftWidth + 8, (int)dy, width - leftWidth - 16, (int)(lineStep + 8), (Color){ 26, 36, 44, 255 });
+            DrawTextEx(font, parsedDiff.files[f].path,
+                       (Vector2){ (float)leftWidth + 14, dy + 4 }, fontSize, 1, textHash);
+            dy += lineStep + 10;
 
-            DrawTextEx(font, parsedDiff.lines[i].text,
-                       (Vector2){ leftWidth + 10, dy },
-                       fontSize, 1, c);
+            int start = parsedDiff.files[f].lineStart;
+            int count = parsedDiff.files[f].lineCount;
+            for (int i = 0; i < count && dy < height; i++)
+            {
+                DiffLine *dl = &parsedDiff.lines[start + i];
+                Color c = textMain;
+                if (dl->type == '+') c = plusColor;
+                else if (dl->type == '-') c = minusColor;
+                else if (dl->type == '@') c = textHash;
 
-            dy += lineStep;
+                DrawTextEx(font, dl->text, (Vector2){ (float)leftWidth + 12, dy }, fontSize, 1, c);
+                dy += lineStep;
+            }
+            dy += 8;
         }
 
         if (repoInputActive)
