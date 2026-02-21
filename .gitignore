@@ -1,3 +1,8 @@
+.cache/
+build_clang/
+compile_commands.json
+CMakeLists.txt
+
 *.o
 
-gitviz
+build/
