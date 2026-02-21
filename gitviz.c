@@ -58,6 +58,8 @@ typedef struct {
 
 static RepoStatus repoStatus;
 static ParsedDiff parsedDiff;
+static char statusHint[128];
+static char repoRoot[512];
 
 static int selected = 0;
 static int hover    = -1;
@@ -89,6 +91,92 @@ static void CopyBounded(char *dst, size_t dstSize, const char *src)
     if (n >= dstSize) n = dstSize - 1;
     memcpy(dst, src, n);
     dst[n] = 0;
+}
+
+static void ShellQuote(char *dst, size_t dstSize, const char *src)
+{
+    size_t d = 0;
+    if (dstSize == 0) return;
+    if (d + 1 < dstSize) dst[d++] = '\'';
+    for (size_t i = 0; src[i] != 0 && d + 1 < dstSize; i++)
+    {
+        if (src[i] == '\'')
+        {
+            const char *esc = "'\\''";
+            for (size_t j = 0; esc[j] != 0 && d + 1 < dstSize; j++)
+                dst[d++] = esc[j];
+        }
+        else
+        {
+            dst[d++] = src[i];
+        }
+    }
+    if (d + 1 < dstSize) dst[d++] = '\'';
+    dst[d] = 0;
+}
+
+static bool ResolveRepoRoot(const char *startPath)
+{
+    char qPath[1200];
+    char cmd[1400];
+    char line[MAX_LINE];
+
+    ShellQuote(qPath, sizeof(qPath), startPath);
+    snprintf(cmd, sizeof(cmd), "git -C %s rev-parse --show-toplevel 2>/dev/null", qPath);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return false;
+
+    repoRoot[0] = 0;
+    if (fgets(line, sizeof(line), fp))
+    {
+        TrimTrailingNewline(line);
+        CopyBounded(repoRoot, sizeof(repoRoot), line);
+    }
+
+    int rc = pclose(fp);
+    return rc == 0 && repoRoot[0] != 0;
+}
+
+static void PrintUsage(const char *prog)
+{
+    printf("Usage: %s [repo-path]\n", prog);
+    printf("       %s -r <repo-path>\n", prog);
+    printf("       %s --repo <repo-path>\n\n", prog);
+    printf("Options:\n");
+    printf("  -h, --help          Show this help and exit\n");
+    printf("  -r, --repo <path>   Observe the git repository at <path>\n\n");
+    printf("Runtime keys:\n");
+    printf("  Up/Down             Select changed file\n");
+    printf("  Mouse wheel         Scroll panel under cursor\n");
+    printf("  R                   Refresh git status/diff\n");
+    printf("  Ctrl + '+' / '-'    Increase/decrease font size\n");
+}
+
+static bool ParseArgs(int argc, char **argv, const char **repoArg, bool *showHelp)
+{
+    *repoArg = ".";
+    *showHelp = false;
+
+    for (int i = 1; i < argc; i++)
+    {
+        const char *a = argv[i];
+        if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0)
+        {
+            *showHelp = true;
+            return true;
+        }
+        if (strcmp(a, "-r") == 0 || strcmp(a, "--repo") == 0)
+        {
+            if (i + 1 >= argc) return false;
+            *repoArg = argv[++i];
+            continue;
+        }
+        if (a[0] == '-')
+            return false;
+        *repoArg = a;
+    }
+    return true;
 }
 
 static void ParseHunkHeader(const char *line, DiffHunk *hunk)
@@ -154,8 +242,24 @@ static void ParseStatusLine(const char *line, ChangedFile *out)
 
 static void LoadRepoStatus(void)
 {
-    FILE *fp = popen("git status --porcelain=v1", "r");
-    if (!fp) return;
+    statusHint[0] = 0;
+    if (repoRoot[0] == 0)
+    {
+        CopyBounded(statusHint, sizeof(statusHint), "No repository selected");
+        return;
+    }
+
+    char qRepo[1200];
+    char cmd[1400];
+    ShellQuote(qRepo, sizeof(qRepo), repoRoot);
+    snprintf(cmd, sizeof(cmd), "git -C %s status --porcelain=v1", qRepo);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp)
+    {
+        CopyBounded(statusHint, sizeof(statusHint), "Failed to run git status");
+        return;
+    }
 
     repoStatus.fileCount = 0;
     char line[MAX_LINE];
@@ -166,7 +270,14 @@ static void LoadRepoStatus(void)
         if (repoStatus.files[repoStatus.fileCount].path[0] != 0)
             repoStatus.fileCount++;
     }
-    pclose(fp);
+    int rc = pclose(fp);
+    if (rc != 0)
+    {
+        CopyBounded(statusHint, sizeof(statusHint), "Not inside a git repository");
+        return;
+    }
+    if (repoStatus.fileCount == 0)
+        CopyBounded(statusHint, sizeof(statusHint), "No local changes. Edit files, then press R to refresh.");
 }
 
 /* ------------------------------------------------------------ */
@@ -174,11 +285,16 @@ static void LoadRepoStatus(void)
 static void LoadDiffForFile(int index)
 {
     if (index < 0 || index >= repoStatus.fileCount) return;
+    if (repoRoot[0] == 0) return;
 
-    char cmd[640];
+    char qRepo[1200];
+    char qPath[1200];
+    char cmd[2800];
+    ShellQuote(qRepo, sizeof(qRepo), repoRoot);
+    ShellQuote(qPath, sizeof(qPath), repoStatus.files[index].path);
     snprintf(cmd, sizeof(cmd),
-             "git diff --no-color -- \"%s\"",
-             repoStatus.files[index].path);
+             "git -C %s diff --no-color -- %s",
+             qRepo, qPath);
 
     FILE *fp = popen(cmd, "r");
     if (!fp) return;
@@ -234,8 +350,27 @@ static void LoadDiffForFile(int index)
 
 /* ------------------------------------------------------------ */
 
-int main(void)
+int main(int argc, char **argv)
 {
+    const char *startPath = ".";
+    bool showHelp = false;
+    if (!ParseArgs(argc, argv, &startPath, &showHelp))
+    {
+        PrintUsage(argv[0]);
+        return 2;
+    }
+    if (showHelp)
+    {
+        PrintUsage(argv[0]);
+        return 0;
+    }
+
+    if (!ResolveRepoRoot(startPath))
+    {
+        repoRoot[0] = 0;
+        CopyBounded(statusHint, sizeof(statusHint), "Invalid repo path. Usage: gitviz [repo-path]");
+    }
+
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(1200, 800, "gitviz");
 
@@ -246,6 +381,9 @@ int main(void)
         font = GetFontDefault();
     }
     SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
+
+    if (repoRoot[0] != 0)
+        SetWindowTitle(TextFormat("gitviz - %s", repoRoot));
 
     LoadRepoStatus();
     if (repoStatus.fileCount > 0)
@@ -382,10 +520,22 @@ int main(void)
                        (Vector2){ 74, y },
                        fontSize, 1, textMain);
         }
+        if (repoStatus.fileCount == 0)
+        {
+            DrawTextEx(font, statusHint,
+                       (Vector2){ 20, (float)listTop },
+                       fontSize, 1, textMain);
+        }
 
         DrawRectangle(leftWidth, 0, width - leftWidth, height, bgDiff);
 
         float dy = listTop - diffScroll * lineStep;
+        if (parsedDiff.lineCount == 0)
+        {
+            DrawTextEx(font, "Select a changed file to view its diff.",
+                       (Vector2){ leftWidth + 12, (float)listTop },
+                       fontSize, 1, textMain);
+        }
         for (int i = 0; i < parsedDiff.lineCount && dy < height; i++)
         {
             Color c = textMain;

@@ -6,6 +6,7 @@ LDLIBS := -lraylib -lm -ldl -lpthread -lGL -lrt -lX11
 
 TARGET := build/gitviz
 SRC := gitviz.c
+REPO ?= $(CURDIR)
 
 .PHONY: all run clean
 
@@ -15,7 +16,7 @@ $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) $(INCLUDES) $< -o $@ $(LDFLAGS) $(LDLIBS)
 
 run: $(TARGET)
-	./$(TARGET)
+	./$(TARGET) "$(REPO)"
 
 clean:
 	rm -f $(TARGET)
