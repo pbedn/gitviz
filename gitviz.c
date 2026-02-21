@@ -117,6 +117,7 @@ static bool fontSmallOwned = false;
 
 /* ------------------------------------------------------------ */
 
+// Remove trailing newline and carriage-return characters in-place.
 static void TrimTrailingNewline(char *s)
 {
     size_t n = strlen(s);
@@ -127,6 +128,7 @@ static void TrimTrailingNewline(char *s)
     }
 }
 
+// Copy src into dst with explicit NUL termination and size bounds.
 static void CopyBounded(char *dst, size_t dstSize, const char *src)
 {
     if (dstSize == 0) return;
@@ -136,6 +138,8 @@ static void CopyBounded(char *dst, size_t dstSize, const char *src)
     dst[n] = 0;
 }
 
+// Wrap a path/argument in single quotes for shell-safe command building.
+// Escapes inner single quotes using POSIX-compatible pattern.
 static void ShellQuote(char *dst, size_t dstSize, const char *src)
 {
     size_t d = 0;
@@ -158,12 +162,14 @@ static void ShellQuote(char *dst, size_t dstSize, const char *src)
     dst[d] = 0;
 }
 
+// Return true if path exists and is a directory.
 static bool IsDirectoryPath(const char *path)
 {
     struct stat st;
     return (stat(path, &st) == 0) && S_ISDIR(st.st_mode);
 }
 
+// Join base/name into dst unless name is already absolute.
 static void JoinPath(char *dst, size_t dstSize, const char *base, const char *name)
 {
     if ((name[0] == '/') || (base[0] == 0))
@@ -174,6 +180,7 @@ static void JoinPath(char *dst, size_t dstSize, const char *base, const char *na
     snprintf(dst, dstSize, "%s/%s", base, name);
 }
 
+// Trim trailing slashes while keeping root '/' intact.
 static void TrimTrailingSlash(char *path)
 {
     size_t n = strlen(path);
@@ -184,6 +191,8 @@ static void TrimTrailingSlash(char *path)
     }
 }
 
+// Replace path with its parent directory.
+// Falls back to '.' when no slash is present.
 static void GoParentPath(char *path, size_t pathSize)
 {
     TrimTrailingSlash(path);
@@ -197,6 +206,7 @@ static void GoParentPath(char *path, size_t pathSize)
     else *slash = 0;
 }
 
+// qsort comparator for lexicographic string ordering.
 static int CompareStrings(const void *a, const void *b)
 {
     const char *sa = (const char *)a;
@@ -204,6 +214,8 @@ static int CompareStrings(const void *a, const void *b)
     return strcmp(sa, sb);
 }
 
+// Populate repository picker with immediate child directories.
+// Side effects: resets picker selection/scroll state.
 static void RefreshPickerItems(void)
 {
     pickerItemCount = 0;
@@ -249,12 +261,15 @@ static void RefreshPickerItems(void)
     repoInputHint[0] = 0;
 }
 
+// Move picker path one directory up and refresh list.
 static void PickerGoParent(void)
 {
     GoParentPath(repoInputPath, sizeof(repoInputPath));
     RefreshPickerItems();
 }
 
+// Enter currently selected picker directory.
+// Special-case '..' to move to parent.
 static void PickerOpenSelected(void)
 {
     if (pickerActive < 0 || pickerActive >= pickerItemCount)
@@ -280,6 +295,8 @@ static void PickerOpenSelected(void)
     RefreshPickerItems();
 }
 
+// Resolve startPath to git top-level directory.
+// Side effects: updates repoRoot on success.
 static bool ResolveRepoRoot(const char *startPath)
 {
     char qPath[1200];
@@ -308,6 +325,7 @@ static bool ResolveRepoRoot(const char *startPath)
     return false;
 }
 
+// Print command-line help and available runtime shortcuts.
 static void PrintUsage(const char *prog)
 {
     printf("Usage: %s [repo-path]\n", prog);
@@ -324,6 +342,8 @@ static void PrintUsage(const char *prog)
     printf("  Ctrl + '+' / '-'    Increase/decrease font size\n");
 }
 
+// Parse CLI arguments for help and repository path options.
+// Supports positional path and -r/--repo.
 static bool ParseArgs(int argc, char **argv, const char **repoArg, bool *showHelp)
 {
     *repoArg = ".";
@@ -350,6 +370,7 @@ static bool ParseArgs(int argc, char **argv, const char **repoArg, bool *showHel
     return true;
 }
 
+// Count output lines from a shell command.
 static int CountLinesInCommand(const char *cmd)
 {
     FILE *fp = popen(cmd, "r");
@@ -361,6 +382,7 @@ static int CountLinesInCommand(const char *cmd)
     return count;
 }
 
+// Reset per-diff UI state after selection changes.
 static void ResetDiffPanelUiState(void)
 {
     for (int i = 0; i < MAX_DIFF_FILES; i++) panelCollapsed[i] = false;
@@ -368,6 +390,7 @@ static void ResetDiffPanelUiState(void)
     activeHunk = 0;
 }
 
+// Return visual line count for a panel, accounting for collapsed state.
 static int GetPanelVisualLines(int panelIndex)
 {
     if (panelIndex < 0 || panelIndex >= parsedDiff.fileCount) return 0;
@@ -375,6 +398,7 @@ static int GetPanelVisualLines(int panelIndex)
     return 2 + body; // header + spacer + optional body
 }
 
+// Return cumulative visual line offset at top of target panel.
 static int GetVisualLineForPanelTop(int panelIndex)
 {
     int lines = 0;
@@ -383,6 +407,7 @@ static int GetVisualLineForPanelTop(int panelIndex)
     return lines;
 }
 
+// Map hunk index to global visual line offset for quick scrolling.
 static int GetVisualLineForHunk(int hunkIndex)
 {
     if (hunkIndex < 0 || hunkIndex >= parsedDiff.hunkCount) return 0;
@@ -390,6 +415,7 @@ static int GetVisualLineForHunk(int hunkIndex)
     return GetVisualLineForPanelTop(h->fileIndex) + 1 + h->lineInFile;
 }
 
+// Find closest hunk index to a given panel index.
 static int FindClosestHunkForPanel(int panelIndex)
 {
     int best = -1;
@@ -407,6 +433,7 @@ static int FindClosestHunkForPanel(int panelIndex)
     return best;
 }
 
+// Read first line from command output into caller-provided buffer.
 static bool ReadFirstLineFromCommand(const char *cmd, char *out, size_t outSize)
 {
     FILE *fp = popen(cmd, "r");
@@ -423,6 +450,7 @@ static bool ReadFirstLineFromCommand(const char *cmd, char *out, size_t outSize)
     return ok;
 }
 
+// Add a new diff file panel and return its index.
 static int AddDiffPanel(const char *path)
 {
     if (parsedDiff.fileCount >= MAX_DIFF_FILES) return -1;
@@ -433,6 +461,7 @@ static int AddDiffPanel(const char *path)
     return parsedDiff.fileCount - 1;
 }
 
+// Extract display file path from a 'diff --git a/... b/...' header.
 static void ParsePathFromDiffHeader(const char *line, char *out, size_t outSize)
 {
     const char *b = strstr(line, " b/");
@@ -451,6 +480,8 @@ static void ParsePathFromDiffHeader(const char *line, char *out, size_t outSize)
     CopyBounded(out, outSize, "(file)");
 }
 
+// Parse git diff stream into file panels, lines, and hunk anchors.
+// Assumes unified diff format with 'diff --git' boundaries.
 static void ParseDiffStream(FILE *fp)
 {
     parsedDiff.lineCount = 0;
@@ -489,6 +520,7 @@ static void ParseDiffStream(FILE *fp)
     }
 }
 
+// Build left-pane timeline and status counters from current repo state.
 static void LoadTimeline(void)
 {
     timelineCount = 0;
@@ -553,6 +585,8 @@ static void LoadTimeline(void)
     pclose(fp);
 }
 
+// Load diff content for currently selected timeline item.
+// Side effects: resets parsed diff and panel UI state.
 static void LoadDiffForSelection(int index)
 {
     parsedDiff.lineCount = 0;
@@ -586,6 +620,7 @@ static void LoadDiffForSelection(int index)
 
 /* ------------------------------------------------------------ */
 
+// Switch active repository path and reload timeline/diff data.
 static bool ReloadFromRepoPath(const char *path)
 {
     if (!ResolveRepoRoot(path))
@@ -604,6 +639,7 @@ static bool ReloadFromRepoPath(const char *path)
     return true;
 }
 
+// Refresh timeline while preserving nearest prior selection.
 static void RefreshTimelineAndSelection(void)
 {
     TimelineType prevType = TIMELINE_UNSTAGED;
