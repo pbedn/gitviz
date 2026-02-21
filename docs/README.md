@@ -4,4 +4,4 @@
 
 ## Screenshot
 
-![gitviz screenshot](res/gitviz-0.1.png)
+![gitviz screenshot](res/gitviz-0.1.jpg)
