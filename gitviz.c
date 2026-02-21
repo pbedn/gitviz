@@ -60,6 +60,9 @@ static RepoStatus repoStatus;
 static ParsedDiff parsedDiff;
 static char statusHint[128];
 static char repoRoot[512];
+static bool repoInputActive = false;
+static char repoInputPath[512];
+static char repoInputHint[128];
 
 static int selected = 0;
 static int hover    = -1;
@@ -150,6 +153,7 @@ static void PrintUsage(const char *prog)
     printf("  Up/Down             Select changed file\n");
     printf("  Mouse wheel         Scroll panel under cursor\n");
     printf("  R                   Refresh git status/diff\n");
+    printf("  Ctrl + O            Open repository switcher\n");
     printf("  Ctrl + '+' / '-'    Increase/decrease font size\n");
 }
 
@@ -350,6 +354,33 @@ static void LoadDiffForFile(int index)
 
 /* ------------------------------------------------------------ */
 
+static void ReloadFromRepoPath(const char *path)
+{
+    if (!ResolveRepoRoot(path))
+    {
+        repoRoot[0] = 0;
+        repoStatus.fileCount = 0;
+        parsedDiff.lineCount = parsedDiff.hunkCount = 0;
+        selected = 0;
+        commitScroll = 0;
+        diffScroll = 0;
+        CopyBounded(statusHint, sizeof(statusHint), "Invalid repo path. Press Ctrl+O to try again.");
+        return;
+    }
+
+    SetWindowTitle(TextFormat("gitviz - %s", repoRoot));
+    selected = 0;
+    commitScroll = 0;
+    diffScroll = 0;
+    LoadRepoStatus();
+    if (repoStatus.fileCount > 0)
+        LoadDiffForFile(0);
+    else
+        parsedDiff.lineCount = parsedDiff.hunkCount = 0;
+}
+
+/* ------------------------------------------------------------ */
+
 int main(int argc, char **argv)
 {
     const char *startPath = ".";
@@ -365,12 +396,6 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (!ResolveRepoRoot(startPath))
-    {
-        repoRoot[0] = 0;
-        CopyBounded(statusHint, sizeof(statusHint), "Invalid repo path. Usage: gitviz [repo-path]");
-    }
-
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(1200, 800, "gitviz");
 
@@ -382,12 +407,7 @@ int main(int argc, char **argv)
     }
     SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
 
-    if (repoRoot[0] != 0)
-        SetWindowTitle(TextFormat("gitviz - %s", repoRoot));
-
-    LoadRepoStatus();
-    if (repoStatus.fileCount > 0)
-        LoadDiffForFile(0);
+    ReloadFromRepoPath(startPath);
 
     SetTargetFPS(60);
 
@@ -405,17 +425,80 @@ int main(int argc, char **argv)
 
         lineStep = fontSize * 1.35f;
 
-        if (IsKeyPressed(KEY_DOWN) && selected < repoStatus.fileCount - 1)
+        if ((IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && IsKeyPressed(KEY_O))
+        {
+            repoInputActive = true;
+            repoInputHint[0] = 0;
+            if (repoRoot[0] != 0)
+                CopyBounded(repoInputPath, sizeof(repoInputPath), repoRoot);
+            else
+                CopyBounded(repoInputPath, sizeof(repoInputPath), ".");
+        }
+
+        if (repoInputActive)
+        {
+            int ch = GetCharPressed();
+            while (ch > 0)
+            {
+                if (ch >= 32 && ch <= 126)
+                {
+                    size_t len = strlen(repoInputPath);
+                    if (len + 1 < sizeof(repoInputPath))
+                    {
+                        repoInputPath[len] = (char)ch;
+                        repoInputPath[len + 1] = 0;
+                    }
+                }
+                ch = GetCharPressed();
+            }
+
+            if (IsKeyPressed(KEY_BACKSPACE))
+            {
+                size_t len = strlen(repoInputPath);
+                if (len > 0) repoInputPath[len - 1] = 0;
+            }
+            if ((IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && IsKeyPressed(KEY_V))
+            {
+                const char *clip = GetClipboardText();
+                if (clip && clip[0] != 0)
+                {
+                    size_t have = strlen(repoInputPath);
+                    size_t room = sizeof(repoInputPath) - 1 - have;
+                    if (room > 0)
+                    {
+                        strncat(repoInputPath, clip, room);
+                    }
+                }
+            }
+            if (IsKeyPressed(KEY_ESCAPE))
+            {
+                repoInputActive = false;
+            }
+            if (IsKeyPressed(KEY_ENTER))
+            {
+                if (repoInputPath[0] == 0)
+                {
+                    CopyBounded(repoInputHint, sizeof(repoInputHint), "Path cannot be empty");
+                }
+                else
+                {
+                    ReloadFromRepoPath(repoInputPath);
+                    repoInputActive = false;
+                }
+            }
+        }
+
+        if (!repoInputActive && IsKeyPressed(KEY_DOWN) && selected < repoStatus.fileCount - 1)
         {
             selected++;
             LoadDiffForFile(selected);
         }
-        if (IsKeyPressed(KEY_UP) && selected > 0)
+        if (!repoInputActive && IsKeyPressed(KEY_UP) && selected > 0)
         {
             selected--;
             LoadDiffForFile(selected);
         }
-        if (IsKeyPressed(KEY_R))
+        if (!repoInputActive && IsKeyPressed(KEY_R))
         {
             LoadRepoStatus();
             if (selected >= repoStatus.fileCount)
@@ -435,9 +518,9 @@ int main(int argc, char **argv)
         int headerHeight = 34;
         int listTop = headerHeight + 10;
 
-        if (mouse.x < leftWidth)
+        if (!repoInputActive && mouse.x < leftWidth)
             commitScroll -= (int)(wheel * 3);
-        else
+        else if (!repoInputActive)
             diffScroll -= (int)(wheel * 3);
 
         if (commitScroll < 0) commitScroll = 0;
@@ -453,7 +536,7 @@ int main(int argc, char **argv)
                 leftWidth - 20, lineStep
             };
 
-            if (CheckCollisionPointRec(mouse, r))
+            if (!repoInputActive && CheckCollisionPointRec(mouse, r))
             {
                 hover = i;
                 if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
@@ -548,6 +631,34 @@ int main(int argc, char **argv)
                        fontSize, 1, c);
 
             dy += lineStep;
+        }
+
+        if (repoInputActive)
+        {
+            DrawRectangle(0, 0, width, height, (Color){ 0, 0, 0, 160 });
+            int boxW = (int)(width * 0.75f);
+            if (boxW < 560) boxW = 560;
+            if (boxW > width - 40) boxW = width - 40;
+            int boxH = 150;
+            int boxX = (width - boxW) / 2;
+            int boxY = (height - boxH) / 2;
+
+            DrawRectangleRounded((Rectangle){ (float)boxX, (float)boxY, (float)boxW, (float)boxH },
+                                 0.08f, 8, (Color){ 24, 33, 41, 245 });
+            DrawRectangleLinesEx((Rectangle){ (float)boxX, (float)boxY, (float)boxW, (float)boxH },
+                                 2.0f, (Color){ 92, 115, 132, 255 });
+            DrawTextEx(font, "Switch Repository (Enter to apply, Esc to cancel)",
+                       (Vector2){ (float)boxX + 14, (float)boxY + 12 }, fontSize, 1, textHash);
+            DrawRectangle((int)boxX + 12, (int)boxY + 50, boxW - 24, 44, (Color){ 15, 21, 26, 255 });
+            DrawRectangleLines((int)boxX + 12, (int)boxY + 50, boxW - 24, 44, divider);
+            DrawTextEx(font, repoInputPath, (Vector2){ (float)boxX + 20, (float)boxY + 61 }, fontSize, 1, textMain);
+            DrawTextEx(font, "Tip: Ctrl+V to paste path",
+                       (Vector2){ (float)boxX + 14, (float)boxY + 106 }, fontSize * 0.9f, 1, textMain);
+            if (repoInputHint[0] != 0)
+            {
+                DrawTextEx(font, repoInputHint,
+                           (Vector2){ (float)boxX + 240, (float)boxY + 106 }, fontSize * 0.9f, 1, minusColor);
+            }
         }
 
         EndDrawing();
