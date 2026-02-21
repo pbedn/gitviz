@@ -29,6 +29,7 @@
 #define MAX_LINE          1024
 #define MAX_DIFF_LINES    40000
 #define MAX_DIFF_FILES    1024
+#define MAX_HUNKS         4096
 #define MAX_TIMELINE      512
 #define MAX_DIR_ITEMS     256
 #define MAX_COMMIT_TITLE  256
@@ -57,10 +58,17 @@ typedef struct {
 } DiffFilePanel;
 
 typedef struct {
+    int fileIndex;
+    int lineInFile;
+} DiffHunkRef;
+
+typedef struct {
     DiffLine lines[MAX_DIFF_LINES];
     int lineCount;
     DiffFilePanel files[MAX_DIFF_FILES];
     int fileCount;
+    DiffHunkRef hunks[MAX_HUNKS];
+    int hunkCount;
 } ParsedDiff;
 
 static TimelineItem timeline[MAX_TIMELINE];
@@ -98,6 +106,9 @@ static bool dragPaneSplitter = false;
 static float dragLeftGrabY = 0.0f;
 static float dragRightGrabY = 0.0f;
 static float dragSplitterOffsetX = 0.0f;
+static bool panelCollapsed[MAX_DIFF_FILES];
+static int activePanel = 0;
+static int activeHunk = 0;
 
 static Font font;
 static Font fontSmall;
@@ -350,6 +361,52 @@ static int CountLinesInCommand(const char *cmd)
     return count;
 }
 
+static void ResetDiffPanelUiState(void)
+{
+    for (int i = 0; i < MAX_DIFF_FILES; i++) panelCollapsed[i] = false;
+    activePanel = 0;
+    activeHunk = 0;
+}
+
+static int GetPanelVisualLines(int panelIndex)
+{
+    if (panelIndex < 0 || panelIndex >= parsedDiff.fileCount) return 0;
+    int body = panelCollapsed[panelIndex] ? 0 : parsedDiff.files[panelIndex].lineCount;
+    return 2 + body; // header + spacer + optional body
+}
+
+static int GetVisualLineForPanelTop(int panelIndex)
+{
+    int lines = 0;
+    for (int i = 0; i < panelIndex && i < parsedDiff.fileCount; i++)
+        lines += GetPanelVisualLines(i);
+    return lines;
+}
+
+static int GetVisualLineForHunk(int hunkIndex)
+{
+    if (hunkIndex < 0 || hunkIndex >= parsedDiff.hunkCount) return 0;
+    DiffHunkRef *h = &parsedDiff.hunks[hunkIndex];
+    return GetVisualLineForPanelTop(h->fileIndex) + 1 + h->lineInFile;
+}
+
+static int FindClosestHunkForPanel(int panelIndex)
+{
+    int best = -1;
+    int bestDist = 1 << 30;
+    for (int i = 0; i < parsedDiff.hunkCount; i++)
+    {
+        int d = parsedDiff.hunks[i].fileIndex - panelIndex;
+        if (d < 0) d = -d;
+        if (d < bestDist)
+        {
+            best = i;
+            bestDist = d;
+        }
+    }
+    return best;
+}
+
 static bool ReadFirstLineFromCommand(const char *cmd, char *out, size_t outSize)
 {
     FILE *fp = popen(cmd, "r");
@@ -398,6 +455,7 @@ static void ParseDiffStream(FILE *fp)
 {
     parsedDiff.lineCount = 0;
     parsedDiff.fileCount = 0;
+    parsedDiff.hunkCount = 0;
 
     char line[MAX_LINE];
     int currentPanel = -1;
@@ -416,6 +474,13 @@ static void ParseDiffStream(FILE *fp)
 
         if (currentPanel < 0) currentPanel = AddDiffPanel("(summary)");
         if (currentPanel < 0) break;
+
+        if (strncmp(line, "@@ ", 3) == 0 && parsedDiff.hunkCount < MAX_HUNKS)
+        {
+            parsedDiff.hunks[parsedDiff.hunkCount].fileIndex = currentPanel;
+            parsedDiff.hunks[parsedDiff.hunkCount].lineInFile = parsedDiff.files[currentPanel].lineCount;
+            parsedDiff.hunkCount++;
+        }
 
         DiffLine *dl = &parsedDiff.lines[parsedDiff.lineCount++];
         dl->type = line[0] ? line[0] : ' ';
@@ -492,6 +557,7 @@ static void LoadDiffForSelection(int index)
 {
     parsedDiff.lineCount = 0;
     parsedDiff.fileCount = 0;
+    parsedDiff.hunkCount = 0;
 
     if (index < 0 || index >= timelineCount || repoRoot[0] == 0) return;
 
@@ -515,6 +581,7 @@ static void LoadDiffForSelection(int index)
     }
     ParseDiffStream(fp);
     pclose(fp);
+    ResetDiffPanelUiState();
 }
 
 /* ------------------------------------------------------------ */
@@ -690,6 +757,36 @@ int main(int argc, char **argv)
         {
             RefreshTimelineAndSelection();
         }
+        if (!repoInputActive && IsKeyPressed(KEY_J) && parsedDiff.fileCount > 0)
+        {
+            if (activePanel < parsedDiff.fileCount - 1) activePanel++;
+            diffScroll = GetVisualLineForPanelTop(activePanel);
+            int h = FindClosestHunkForPanel(activePanel);
+            if (h >= 0) activeHunk = h;
+        }
+        if (!repoInputActive && IsKeyPressed(KEY_K) && parsedDiff.fileCount > 0)
+        {
+            if (activePanel > 0) activePanel--;
+            diffScroll = GetVisualLineForPanelTop(activePanel);
+            int h = FindClosestHunkForPanel(activePanel);
+            if (h >= 0) activeHunk = h;
+        }
+        if (!repoInputActive && IsKeyPressed(KEY_N) && parsedDiff.hunkCount > 0)
+        {
+            if (activeHunk < parsedDiff.hunkCount - 1) activeHunk++;
+            DiffHunkRef *h = &parsedDiff.hunks[activeHunk];
+            activePanel = h->fileIndex;
+            panelCollapsed[activePanel] = false;
+            diffScroll = GetVisualLineForHunk(activeHunk);
+        }
+        if (!repoInputActive && IsKeyPressed(KEY_P) && parsedDiff.hunkCount > 0)
+        {
+            if (activeHunk > 0) activeHunk--;
+            DiffHunkRef *h = &parsedDiff.hunks[activeHunk];
+            activePanel = h->fileIndex;
+            panelCollapsed[activePanel] = false;
+            diffScroll = GetVisualLineForHunk(activeHunk);
+        }
 
         /* ---------- Mouse ---------- */
 
@@ -718,9 +815,7 @@ int main(int argc, char **argv)
         int diffContentPx = 0;
         for (int f = 0; f < parsedDiff.fileCount; f++)
         {
-            diffContentPx += (int)(lineStep + 10);
-            diffContentPx += (int)(parsedDiff.files[f].lineCount * lineStep);
-            diffContentPx += 8;
+            diffContentPx += (int)((float)GetPanelVisualLines(f) * lineStep);
         }
         if (diffContentPx == 0) diffContentPx = (int)lineStep;
 
@@ -821,6 +916,25 @@ int main(int argc, char **argv)
                 float ratio = (rightTrackH - rightThumbH) > 0 ? (targetTop - (float)rightTrackY)/(float)(rightTrackH - rightThumbH) : 0.0f;
                 float scrollPx = ratio * (float)maxDiffScrollPx;
                 diffScroll = (int)((scrollPx / lineStep) + 0.5f);
+            }
+            else if (mouse.x > (float)leftWidth && mouse.x < rightTrackRec.x)
+            {
+                float py = (float)listTop - diffScroll*lineStep;
+                for (int f = 0; f < parsedDiff.fileCount; f++)
+                {
+                    Rectangle headerRec = { (float)leftWidth + 8, py, (float)width - leftWidth - 18, lineStep };
+                    if (CheckCollisionPointRec(mouse, headerRec))
+                    {
+                        activePanel = f;
+                        panelCollapsed[f] = !panelCollapsed[f];
+                        int h = FindClosestHunkForPanel(f);
+                        if (h >= 0) activeHunk = h;
+                        break;
+                    }
+                    py += lineStep;
+                    if (!panelCollapsed[f]) py += parsedDiff.files[f].lineCount * lineStep;
+                    py += lineStep;
+                }
             }
         }
 
@@ -964,14 +1078,17 @@ int main(int argc, char **argv)
         }
         for (int f = 0; f < parsedDiff.fileCount && dy < height - bottomBarHeight; f++)
         {
-            DrawRectangle(leftWidth + 8, (int)dy, width - leftWidth - 16, (int)(lineStep + 8), (Color){ 26, 36, 44, 255 });
+            Color panelHeader = (f == activePanel) ? (Color){ 45, 62, 76, 255 } : (Color){ 26, 36, 44, 255 };
+            DrawRectangle(leftWidth + 8, (int)dy, width - leftWidth - 16, (int)lineStep, panelHeader);
+            DrawTextEx(font, panelCollapsed[f] ? "[+]" : "[-]",
+                       (Vector2){ (float)leftWidth + 12, dy + 1 }, mainTextSize, mainTextSpacing, textMain);
             DrawTextEx(font, parsedDiff.files[f].path,
-                       (Vector2){ (float)leftWidth + 14, dy + 4 }, mainTextSize, mainTextSpacing, textHash);
-            dy += lineStep + 10;
+                       (Vector2){ (float)leftWidth + 46, dy + 1 }, mainTextSize, mainTextSpacing, textHash);
+            dy += lineStep;
 
             int start = parsedDiff.files[f].lineStart;
             int count = parsedDiff.files[f].lineCount;
-            for (int i = 0; i < count && dy < height - bottomBarHeight; i++)
+            for (int i = 0; !panelCollapsed[f] && i < count && dy < height - bottomBarHeight; i++)
             {
                 DiffLine *dl = &parsedDiff.lines[start + i];
                 Color c = textMain;
@@ -982,7 +1099,7 @@ int main(int argc, char **argv)
                 DrawTextEx(font, dl->text, (Vector2){ (float)leftWidth + 12, dy }, mainTextSize, mainTextSpacing, c);
                 dy += lineStep;
             }
-            dy += 8;
+            dy += lineStep;
         }
 
         DrawRectangle(leftTrackX, leftTrackY, 6, leftTrackH, (Color){ 24, 30, 38, 255 });
@@ -1002,7 +1119,7 @@ int main(int argc, char **argv)
                               rootText, branchName[0] ? branchName : "(unknown)",
                               unstagedFilesCount, stagedFilesCount, untrackedFilesCount),
                    (Vector2){ 10, (float)height - bottomBarHeight + 6 }, infoSize, infoSpacing, textMain);
-        const char *help = "Ctrl+O: Open Repo  R: Refresh  Up/Down: Select  Ctrl+ +/-: Zoom";
+        const char *help = "Ctrl+O Open Repo  R Refresh  J/K Files  N/P Hunks  Ctrl+ +/- Zoom";
         int helpW = MeasureTextEx(fontSmall, help, infoSize, infoSpacing).x;
         DrawTextEx(fontSmall, help,
                    (Vector2){ (float)(width - helpW - 10), (float)height - bottomBarHeight + 6 },
