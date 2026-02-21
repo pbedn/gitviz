@@ -87,10 +87,13 @@ static float lineStep = 18.0f;
 
 static int commitScroll = 0;
 static int diffScroll   = 0;
+static int leftPaneWidth = 430;
 static bool dragLeftScrollbar = false;
 static bool dragRightScrollbar = false;
+static bool dragPaneSplitter = false;
 static float dragLeftGrabY = 0.0f;
 static float dragRightGrabY = 0.0f;
+static float dragSplitterOffsetX = 0.0f;
 
 static Font font;
 
@@ -641,11 +644,18 @@ int main(int argc, char **argv)
         Vector2 mouse = GetMousePosition();
         float wheel = GetMouseWheelMove();
 
-        int leftWidth = 430;
         int headerHeight = 34;
         int listTop = headerHeight + 10;
         int width = GetScreenWidth();
         int height = GetScreenHeight();
+        int minLeftWidth = 260;
+        int minRightWidth = 360;
+        int maxLeftWidth = width - minRightWidth;
+        if (maxLeftWidth < minLeftWidth) maxLeftWidth = minLeftWidth;
+        int leftWidth = leftPaneWidth;
+        if (leftWidth < minLeftWidth) leftWidth = minLeftWidth;
+        if (leftWidth > maxLeftWidth) leftWidth = maxLeftWidth;
+        leftPaneWidth = leftWidth;
         int listViewHeight = height - listTop - 8;
         int diffViewHeight = height - listTop - 8;
         if (listViewHeight < 1) listViewHeight = 1;
@@ -690,6 +700,7 @@ int main(int argc, char **argv)
         Rectangle leftThumbRec = { (float)leftTrackX, (float)leftThumbY, (float)scrollBarWidth, (float)leftThumbH };
         Rectangle leftTrackHitRec = { leftTrackRec.x - scrollHitPad, leftTrackRec.y, leftTrackRec.width + 2*scrollHitPad, leftTrackRec.height };
         Rectangle leftThumbHitRec = { leftThumbRec.x - scrollHitPad, leftThumbRec.y - scrollHitPad, leftThumbRec.width + 2*scrollHitPad, leftThumbRec.height + 2*scrollHitPad };
+        Rectangle splitterRec = { (float)leftWidth - 3.0f, 0.0f, 6.0f, (float)height };
 
         int rightTrackX = width - scrollBarWidth - scrollBarInset;
         int rightTrackY = listTop;
@@ -709,20 +720,28 @@ int main(int argc, char **argv)
         Rectangle rightTrackHitRec = { rightTrackRec.x - scrollHitPad, rightTrackRec.y, rightTrackRec.width + 2*scrollHitPad, rightTrackRec.height };
         Rectangle rightThumbHitRec = { rightThumbRec.x - scrollHitPad, rightThumbRec.y - scrollHitPad, rightThumbRec.width + 2*scrollHitPad, rightThumbRec.height + 2*scrollHitPad };
 
-        if (!repoInputActive && mouse.x < leftWidth)
+        if (!repoInputActive && !dragPaneSplitter && mouse.x < leftWidth)
             commitScroll -= (int)(wheel * 3);
-        else if (!repoInputActive)
+        else if (!repoInputActive && !dragPaneSplitter)
             diffScroll -= (int)(wheel * 3);
 
         if (repoInputActive)
         {
             dragLeftScrollbar = false;
             dragRightScrollbar = false;
+            dragPaneSplitter = false;
         }
 
         if (!repoInputActive && IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
         {
-            if (maxTimelineScrollPx > 0 && CheckCollisionPointRec(mouse, leftThumbHitRec))
+            if (CheckCollisionPointRec(mouse, splitterRec))
+            {
+                dragPaneSplitter = true;
+                dragSplitterOffsetX = mouse.x - (float)leftWidth;
+                dragLeftScrollbar = false;
+                dragRightScrollbar = false;
+            }
+            else if (maxTimelineScrollPx > 0 && CheckCollisionPointRec(mouse, leftThumbHitRec))
             {
                 dragLeftScrollbar = true;
                 dragLeftGrabY = mouse.y - (float)leftThumbY;
@@ -752,6 +771,14 @@ int main(int argc, char **argv)
             }
         }
 
+        if (!repoInputActive && dragPaneSplitter && IsMouseButtonDown(MOUSE_LEFT_BUTTON))
+        {
+            int target = (int)(mouse.x - dragSplitterOffsetX + 0.5f);
+            if (target < minLeftWidth) target = minLeftWidth;
+            if (target > maxLeftWidth) target = maxLeftWidth;
+            leftPaneWidth = target;
+            leftWidth = target;
+        }
         if (!repoInputActive && dragLeftScrollbar && IsMouseButtonDown(MOUSE_LEFT_BUTTON))
         {
             float targetTop = mouse.y - dragLeftGrabY;
@@ -774,6 +801,7 @@ int main(int argc, char **argv)
         {
             dragLeftScrollbar = false;
             dragRightScrollbar = false;
+            dragPaneSplitter = false;
         }
 
         if (commitScroll < 0) commitScroll = 0;
@@ -791,7 +819,7 @@ int main(int argc, char **argv)
                 leftWidth - 20, lineStep
             };
 
-            if (!repoInputActive && !CheckCollisionPointRec(mouse, leftTrackRec) && CheckCollisionPointRec(mouse, r))
+            if (!repoInputActive && !dragPaneSplitter && !CheckCollisionPointRec(mouse, leftTrackRec) && CheckCollisionPointRec(mouse, r))
             {
                 hover = i;
                 if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
@@ -824,6 +852,12 @@ int main(int argc, char **argv)
         DrawTextEx(font, "TIMELINE", (Vector2){ 12, 8 }, fontSize, 1, textHash);
         DrawLineEx((Vector2){ leftWidth, 0 },
                    (Vector2){ leftWidth, height }, 2.0f, divider);
+        bool splitterHover = CheckCollisionPointRec(mouse, splitterRec);
+        Color splitterColor = divider;
+        if (dragPaneSplitter) splitterColor = (Color){ 130, 155, 176, 255 };
+        else if (splitterHover) splitterColor = (Color){ 104, 128, 146, 255 };
+        DrawRectangle((int)splitterRec.x, 0, (int)splitterRec.width, height, (Color){ 21, 28, 35, 255 });
+        DrawLineEx((Vector2){ leftWidth, 0 }, (Vector2){ leftWidth, height }, 2.0f, splitterColor);
         DrawRectangle(leftWidth, 0, width - leftWidth, headerHeight, (Color){ 20, 28, 34, 255 });
         if (timelineCount > 0)
         {
