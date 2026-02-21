@@ -14,6 +14,7 @@
 #pragma GCC diagnostic pop
 #endif
 #include <dirent.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <ctype.h>
@@ -204,6 +205,56 @@ static void GoParentPath(char *path, size_t pathSize)
     }
     if (slash == path) slash[1] = 0;
     else *slash = 0;
+}
+
+// Return directory containing the running executable.
+// Side effects: writes to outPath when successful.
+// Assumes Linux /proc/self/exe is available.
+static bool GetExecutableDir(char *outPath, size_t outPathSize)
+{
+    if (outPathSize == 0) return false;
+
+    char exePath[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+    if (n <= 0 || n >= (ssize_t)sizeof(exePath)) return false;
+    exePath[n] = 0;
+
+    char *slash = strrchr(exePath, '/');
+    if (!slash) return false;
+    *slash = 0;
+
+    CopyBounded(outPath, outPathSize, exePath);
+    return true;
+}
+
+// Try loading a TTF font from source-tree or installed resource paths.
+// Side effects: initializes font and sets bilinear filter on success.
+// Assumes relative install layout: <prefix>/bin and <prefix>/share/gitviz/fonts.
+static bool LoadGitvizFont(Font *outFont, const char *fileName, int size)
+{
+    char candidate[PATH_MAX + 128];
+
+    snprintf(candidate, sizeof(candidate), "assets/fonts/%s", fileName);
+    *outFont = LoadFontEx(candidate, size, 0, 0);
+    if (outFont->texture.id != 0)
+    {
+        SetTextureFilter(outFont->texture, TEXTURE_FILTER_BILINEAR);
+        return true;
+    }
+
+    char exeDir[PATH_MAX];
+    if (GetExecutableDir(exeDir, sizeof(exeDir)))
+    {
+        snprintf(candidate, sizeof(candidate), "%s/../share/gitviz/fonts/%s", exeDir, fileName);
+        *outFont = LoadFontEx(candidate, size, 0, 0);
+        if (outFont->texture.id != 0)
+        {
+            SetTextureFilter(outFont->texture, TEXTURE_FILTER_BILINEAR);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 // qsort comparator for lexicographic string ordering.
@@ -694,29 +745,25 @@ int main(int argc, char **argv)
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(1200, 800, "gitviz");
 
-    font = LoadFontEx("assets/fonts/UbuntuMono-R.ttf", 32, 0, 0);
-    if (font.texture.id == 0)
+    if (!LoadGitvizFont(&font, "UbuntuMono-R.ttf", 32))
     {
-        TraceLog(LOG_WARNING, "Failed to load assets/fonts/UbuntuMono-R.ttf, using raylib default font");
+        TraceLog(LOG_WARNING, "Failed to load UbuntuMono-R.ttf, using raylib default font");
         font = GetFontDefault();
         fontOwned = false;
     }
     else
     {
-        SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
         fontOwned = true;
     }
 
-    fontSmall = LoadFontEx("assets/fonts/Ubuntu-R.ttf", 24, 0, 0);
-    if (fontSmall.texture.id == 0)
+    if (!LoadGitvizFont(&fontSmall, "Ubuntu-R.ttf", 24))
     {
-        TraceLog(LOG_WARNING, "Failed to load assets/fonts/Ubuntu-R.ttf, using raylib default font");
+        TraceLog(LOG_WARNING, "Failed to load Ubuntu-R.ttf, using raylib default font");
         fontSmall = GetFontDefault();
         fontSmallOwned = false;
     }
     else
     {
-        SetTextureFilter(fontSmall.texture, TEXTURE_FILTER_BILINEAR);
         fontSmallOwned = true;
     }
 

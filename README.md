@@ -11,6 +11,8 @@ Quick start:
 - Build: `make`
 - Run: `make run REPO=/path/to/repo`
 - Help: `./build/gitviz --help`
+- Install (binary + app launcher + fonts): `sudo make install`
+- Uninstall: `sudo make uninstall`
 
 Architecture notes:
 - `docs/architecture.md`

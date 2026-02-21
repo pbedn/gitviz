@@ -16,6 +16,9 @@ DESKTOPDIR ?= $(DATADIR)/applications
 ICONDIR ?= $(DATADIR)/pixmaps
 ICON_SRC ?= docs/res/gitviz-0.1.jpg
 APP_ID ?= gitviz
+APP_SHAREDIR ?= $(DATADIR)/gitviz
+FONTDIR ?= $(APP_SHAREDIR)/fonts
+FONTS := assets/fonts/UbuntuMono-R.ttf assets/fonts/Ubuntu-R.ttf
 
 .PHONY: all run test install uninstall install-desktop uninstall-desktop clean
 
@@ -41,6 +44,8 @@ uninstall: uninstall-desktop
 	rm -f "$(DESTDIR)$(BINDIR)/gitviz"
 
 install-desktop:
+	install -d "$(DESTDIR)$(FONTDIR)"
+	install -m 644 $(FONTS) "$(DESTDIR)$(FONTDIR)"
 	install -d "$(DESTDIR)$(ICONDIR)"
 	install -m 644 "$(ICON_SRC)" "$(DESTDIR)$(ICONDIR)/$(APP_ID).jpg"
 	install -d "$(DESTDIR)$(DESKTOPDIR)"
@@ -49,16 +54,16 @@ install-desktop:
 		'Type=Application' \
 		'Name=gitviz' \
 		'Comment=Local Git visualizer' \
-		'Exec=$(BINDIR)/gitviz --repo %F' \
+		'Exec=$(BINDIR)/gitviz' \
 		'Icon=$(ICONDIR)/$(APP_ID).jpg' \
 		'Terminal=false' \
 		'Categories=Development;Utility;' \
-		'MimeType=inode/directory;' \
 	> "$(DESTDIR)$(DESKTOPDIR)/$(APP_ID).desktop"
 
 uninstall-desktop:
 	rm -f "$(DESTDIR)$(DESKTOPDIR)/$(APP_ID).desktop"
 	rm -f "$(DESTDIR)$(ICONDIR)/$(APP_ID).jpg"
+	rm -rf "$(DESTDIR)$(APP_SHAREDIR)"
 
 clean:
 	rm -f $(TARGET) $(TEST_TARGET)

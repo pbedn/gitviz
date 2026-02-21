@@ -122,7 +122,7 @@ Semantic color mapping:
 - removed lines: red,
 - hunk headers and metadata: hash/accent color.
 
-Fonts are loaded from `assets/fonts` only. If unavailable, fallback is raylib default font.
+Fonts are loaded from `assets/fonts` first (source-tree run), then `<exe-dir>/../share/gitviz/fonts` (installed run). If unavailable, fallback is raylib default font.
 
 ## 6. Input and Interaction Model
 
